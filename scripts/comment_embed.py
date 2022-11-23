@@ -9,15 +9,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import pytok
+from pytok import utils
 
-def preprocess(raw_text):
-    text = gensim.utils.to_unicode(raw_text, 'utf8', errors='ignore')
-    text = text.lower()
-    text = gensim.utils.deaccent(text)
-    text = re.sub('@[^ ]+', '@user', text)
-    text = re.sub('http[^ ]+', 'http', text)
-    return text
+import tweet_normalizer
 
 def check_english(text):
     try:
@@ -29,19 +23,16 @@ def check_english(text):
         else:
             raise Exception('Unknown error')
 
-def check_for_repeating_tokens(tokens):
-    num_tokens = len(tokens)
-    num_distinct_tokens = len(set(tokens))
-    return (num_tokens / num_distinct_tokens) > 4
-
-
 def load_comments_df():
     
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
     data_dir_path = os.path.join(this_dir_path, '..', 'data')
 
     df_path = os.path.join(data_dir_path, 'all_comments.csv')
-    comment_df = pytok.utils.get_comment_df(df_path)
+    comment_dir_path = os.path.join(this_dir_path, '..', '..', 'polar-seeds', 'data', 'comments')
+
+    file_paths = [os.path.join(comment_dir_path, file_name, 'video_comments.json') for file_name in os.listdir(comment_dir_path)]
+    comment_df = utils.get_comment_df(df_path, file_paths=file_paths)
 
     comment_df = comment_df[comment_df['text'].notna()]
     comment_df = comment_df[comment_df['text'] != '']
@@ -56,7 +47,7 @@ def load_comments_df():
     english_comments_df = comment_df[comment_df['english']]
 
     # tokenize
-    english_comments_df['text_processed'] = english_comments_df['text'].apply(preprocess)
+    english_comments_df['text_processed'] = english_comments_df['text'].apply(tweet_normalizer.normalizeTweet)
 
     english_comments_df = english_comments_df[english_comments_df['text_processed'].notna()]
     english_comments_df = english_comments_df[english_comments_df['text_processed'] != '']
@@ -75,23 +66,21 @@ def main():
 
     final_comments_df = pd.read_csv(df_path)
 
-    eng_raw_docs = list(final_comments_df['text'].values)
     docs = list(final_comments_df['text_processed'].values)
-    timestamps = list(final_comments_df['createtime'].values)
 
     # Train the model on the corpus.
-    pretrained_model = 'cardiffnlp/twitter-roberta-base'
+    pretrained_model = 'vinai/bertweet-base'
 
-    num_topics = 40
-    topic_model = BERTopic(embedding_model=pretrained_model, nr_topics=num_topics)
+    topic_model = BERTopic(embedding_model=pretrained_model)
 
     #model_path = os.path.join(data_dir_path, 'cache', 'model')
 
     #if not os.path.exists(model_path):
     # get embeddings so we can cache
-    embeddings_cache_path = os.path.join(data_dir_path, 'all_english_comment_twitter_roberta_embeddings.npy')
+    embeddings_cache_path = os.path.join(data_dir_path, 'all_english_comment_bertweet_embeddings.npy')
     topic_model.embedding_model = select_backend(pretrained_model,
                                     language=topic_model.language)
+    topic_model.embedding_model.embedding_model.max_seq_length = 128
     embeddings = topic_model._extract_embeddings(docs,
                                                 method="document",
                                                 verbose=topic_model.verbose)

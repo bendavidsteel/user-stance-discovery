@@ -19,28 +19,31 @@ def main():
     multi_graph.remove_edges_from(nx.selfloop_edges(multi_graph))
 
     edge_filters = {
-        'all': lambda edge_type: True,
-        'video_comment': lambda edge_type: edge_type == 'video_comment',
-        'comment_mention': lambda edge_type: edge_type == 'comment_mention',
-        'video_share': lambda edge_type: edge_type == 'video_share',
-        'video_mention': lambda edge_type: edge_type == 'video_mention',
-        'comment_reply': lambda edge_type: edge_type == 'comment_reply'
+        'All': lambda edge_type: True,
+        'Video Comments': lambda edge_type: edge_type == 'video_comment',
+        'Comment Mentions': lambda edge_type: edge_type == 'comment_mention',
+        'Video Shares': lambda edge_type: edge_type == 'video_share',
+        'Video Mentions': lambda edge_type: edge_type == 'video_mention',
+        'Comment Replies': lambda edge_type: edge_type == 'comment_reply'
     }
 
-    fig, axes = plt.subplots(nrows=1, ncols=len(edge_filters), sharey=True, figsize=(20, 4))
+    fig, axes = plt.subplots(nrows=1, ncols=len(edge_filters), sharey=True, figsize=(15, 3))
 
     for ax, (name, edge_filter) in zip(axes, edge_filters.items()):
         graph = nx.MultiGraph(((u,v) for (u,v,d) in multi_graph.edges(data=True) if edge_filter(d['type'])))
 
         degree_freq = nx.degree_histogram(graph)
 
-        ax.scatter(list(range(len(degree_freq))), degree_freq)
+        ax.scatter(list(range(len(degree_freq))), degree_freq, s=5)
         ax.set_xlabel('Degree')
-        ax.set_ylabel('Frequency')
         ax.set_xscale('log')
         ax.set_yscale('log')
         ax.set_title(name)
 
+        if len(degree_freq) < 10:
+            ax.set_xlim(left=0.8, right=11)
+
+    axes[0].set_ylabel('Frequency')
     fig.tight_layout()
 
     fig_dir_path = os.path.join(root_dir_path, 'figs')

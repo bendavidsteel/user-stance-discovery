@@ -7,7 +7,7 @@ import networkx as nx
 import pandas as pd
 import tqdm
 
-import pytok
+from pytok import utils
 
 def to_jsonable_dict(row):
     d = {}
@@ -43,8 +43,8 @@ def main():
     comment_csv_path = os.path.join(data_dir_path, 'all_comments.csv')
     video_csv_path = os.path.join(data_dir_path, 'all_videos.csv')
 
-    comment_df = pytok.utils.get_comment_df(comment_csv_path)
-    video_df = pytok.utils.get_video_df(video_csv_path)
+    comment_df = utils.get_comment_df(comment_csv_path)
+    video_df = utils.get_video_df(video_csv_path)
 
     count_comments_df = comment_df[['author_id', 'author_name', 'createtime', 'text', 'comment_language']].groupby(['author_id', 'author_name']).aggregate(list).reset_index()
     count_comments_df['comment_count'] = count_comments_df['createtime'].str.len()
@@ -85,10 +85,10 @@ def main():
     graph.add_nodes_from(user_ids)
 
     # video comment replies
-    add_edges_to_graph(interactions_df, 'comment_author_id', 'video_author_id', ['comment_createtime', 'video_id', 'video_desc', 'comment_id', 'comment_text'], 'video_comment', graph)
+    add_edges_to_graph(interactions_df, 'comment_author_id', 'video_author_id', ['comment_createtime', 'video_id', 'comment_id'], 'video_comment', graph)
 
     # comment mentions
-    add_edges_to_graph(mentions_df, 'author_id', 'mention_id', ['createtime', 'text'], 'comment_mention', graph)
+    add_edges_to_graph(mentions_df, 'author_id', 'mention_id', ['createtime'], 'comment_mention', graph)
 
     # video shares
     add_edges_to_graph(shares_df, 'author_id', 'share_video_user_id', ['createtime'], 'video_share', graph)
@@ -99,7 +99,6 @@ def main():
     # comment replies
     add_edges_to_graph(comment_replies_df, 'author_id_reply', 'author_id', ['createtime_reply', 'comment_id_reply', 'comment_id'], 'comment_reply', graph)
 
-    
     # write to file
     graph_data = nx.readwrite.node_link_data(graph)
 
