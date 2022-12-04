@@ -16,7 +16,7 @@ def main():
             comment_embeddings = np.load(f)
 
     # sample some embeddings
-    sample_percent = 0.33
+    sample_percent = 0.25
     video_sample_idx = np.random.choice(video_embeddings.shape[0], round(sample_percent * video_embeddings.shape[0]))
     comment_sample_idx = np.random.choice(comment_embeddings.shape[0], round(sample_percent * comment_embeddings.shape[0]))
     video_sample_embeddings = video_embeddings[video_sample_idx, :]
@@ -26,11 +26,11 @@ def main():
     embeddings = np.concatenate((video_embeddings, comment_embeddings), axis=0)
     
     low_memory = False
-    # using same settings as bertopic
+    num_components = 2
     umap_model = umap.UMAP(n_neighbors=15,
-                           n_components=5,
+                           n_components=num_components,
                            min_dist=0.0,
-                           metric='cosine',
+                           metric='euclidean',
                            low_memory=low_memory,
                            verbose=True)
 
@@ -41,8 +41,8 @@ def main():
     video_umap_embeddings = umap_embeddings[:video_embeddings.shape[0], :]
     comment_umap_embeddings = umap_embeddings[-comment_embeddings.shape[0]:, :]
 
-    comment_umap_embeddings_cache_path = os.path.join(data_dir_path, 'all_english_comment_bertweet_umap_embeddings.npy')
-    video_umap_embeddings_cache_path = os.path.join(data_dir_path, 'all_video_desc_bertweet_umap_embeddings.npy')
+    comment_umap_embeddings_cache_path = os.path.join(data_dir_path, f'all_english_comment_bertweet_umap_{num_components}_embeddings.npy')
+    video_umap_embeddings_cache_path = os.path.join(data_dir_path, f'all_video_desc_bertweet_umap_{num_components}_embeddings.npy')
 
     with open(comment_umap_embeddings_cache_path, 'wb') as f:
         np.save(f, comment_umap_embeddings)

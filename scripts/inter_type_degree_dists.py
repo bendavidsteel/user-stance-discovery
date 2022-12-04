@@ -27,9 +27,9 @@ def main():
         'Comment Replies': lambda edge_type: edge_type == 'comment_reply'
     }
 
-    fig, axes = plt.subplots(nrows=1, ncols=len(edge_filters), sharey=True, figsize=(15, 3))
+    fig, axes = plt.subplots(nrows=2, ncols=3, sharey=True, figsize=(10, 5))
 
-    for ax, (name, edge_filter) in zip(axes, edge_filters.items()):
+    for ax, (name, edge_filter) in zip(axes.ravel().tolist(), edge_filters.items()):
         graph = nx.MultiGraph(((u,v) for (u,v,d) in multi_graph.edges(data=True) if edge_filter(d['type'])))
 
         degree_freq = nx.degree_histogram(graph)
@@ -43,7 +43,8 @@ def main():
         if len(degree_freq) < 10:
             ax.set_xlim(left=0.8, right=11)
 
-    axes[0].set_ylabel('Frequency')
+    axes[0][0].set_ylabel('Frequency')
+    axes[1][0].set_ylabel('Frequency')
     fig.tight_layout()
 
     fig_dir_path = os.path.join(root_dir_path, 'figs')
