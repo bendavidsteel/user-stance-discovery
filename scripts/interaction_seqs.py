@@ -12,13 +12,13 @@ import tqdm
 import warnings
 warnings.filterwarnings("error")
 
-GLOBAL_CONTENT_SAMPLE = 1000
-NEIGHBOUR_CONTENT_SAMPLE = 1000
+GLOBAL_CONTENT_SAMPLE = 500
+NEIGHBOUR_CONTENT_SAMPLE = 500
 NEIGHBOUR_SAMPLE = 10000
-USER_SAMPLE = 2000000
+USER_SAMPLE = 100000
 MAX_TIME_FRAME = datetime.timedelta(days=7)
-INSTANTANEOUS = True
-NUM_DIMS = 2
+INSTANTANEOUS = False
+NUM_DIMS = 5
 
 def get_neighbours(multi_graph, user_id):
 
@@ -129,7 +129,10 @@ def process_global_data(time_content_df, content_embeddings, last_datetime, inte
     return interaction_data
 
 def assert_and_get_viewed_id(user_content, edge_data, time_content_df, viewed_content_user_id, user_id_name, viewed_id_name):
-    assert user_content.name[1] == edge_data[user_id_name]
+    if INSTANTANEOUS:
+        assert user_content.name[1] == edge_data[user_id_name]
+    else:
+        assert user_content.iloc[0].name == edge_data[user_id_name]
     viewed_content = time_content_df.xs(viewed_content_user_id, level='author_id', drop_level=False).xs(edge_data[viewed_id_name], level=viewed_id_name, drop_level=False)
     if len(viewed_content) != 1:
         raise ValueError()
@@ -162,7 +165,7 @@ def process_interaction(edge_data, user_comments_df, time_comments_df, time_vide
         user_content_index = int(user_content['index'])
         user_content_embed = comment_embeddings[user_content_index, :]
     else:
-        user_content_index = int(user_content['index'])
+        user_content_index = user_content['index']
         user_content_embed = np.mean(comment_embeddings[user_content_index, :], axis=0)
 
     interaction_data = {
@@ -234,12 +237,8 @@ def process_interaction(edge_data, user_comments_df, time_comments_df, time_vide
 
             prev_content_cosine_sim = np.dot(prev_content_embed, user_content_embed) / (norm_prev_content_embed * norm_user_content_embed)
 
-            if INSTANTANEOUS:
-                viewed_content_cosine_sim = video_comment_cosine_sim[viewed_content_index, user_content_index]
-                viewed_prev_content_cosine_sim = video_comment_cosine_sim[viewed_content_index, prev_content_index]
-            else:
-                viewed_content_cosine_sim = np.dot(viewed_content_embed, user_content_embed) / (comment_norm[viewed_content_index] * norm_user_content_embed)
-                viewed_prev_content_cosine_sim = np.dot(viewed_content_embed, prev_content_embed) / (comment_norm[viewed_content_index] * norm_prev_content_embed)
+            viewed_content_cosine_sim = np.dot(viewed_content_embed, user_content_embed) / (comment_norm[viewed_content_index] * norm_user_content_embed)
+            viewed_prev_content_cosine_sim = np.dot(viewed_content_embed, prev_content_embed) / (comment_norm[viewed_content_index] * norm_prev_content_embed)
 
         interaction_data['user_content_embed'] = [float(round(e, 8)) for e in user_content_embed]
         interaction_data['viewed_content_embed'] = [float(round(e, 8)) for e in viewed_content_embed]

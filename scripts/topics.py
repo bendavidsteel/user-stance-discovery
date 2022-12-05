@@ -7,12 +7,12 @@ import pandas as pd
 
 def main():
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
-    data_dir_path = os.path.join(this_dir_path, '..', '..', 'data')
+    data_dir_path = os.path.join(this_dir_path, '..', 'data')
 
-    df_path = os.path.join(data_dir_path, 'cache', 'all_english_comments.csv')
+    df_path = os.path.join(data_dir_path, 'all_english_comments.csv')
     final_comments_df = pd.read_csv(df_path)
 
-    df_path = os.path.join(data_dir_path, 'cache', 'all_video_desc.csv')
+    df_path = os.path.join(data_dir_path, 'all_video_desc.csv')
     final_videos_df = pd.read_csv(df_path)
 
     comment_docs = list(final_comments_df['text_processed'].values)
@@ -24,11 +24,12 @@ def main():
 
     topic_model = BERTopic(embedding_model=pretrained_model)
 
-    embeddings_cache_path = os.path.join(data_dir_path, 'cache', 'all_english_comment_bertweet_umap_embeddings.npy')
+    dim_size = 2
+    embeddings_cache_path = os.path.join(data_dir_path, f'all_english_comment_bertweet_umap_{dim_size}_embeddings.npy')
     with open(embeddings_cache_path, 'rb') as f:
         comment_umap_embeddings = np.load(f)
 
-    embeddings_cache_path = os.path.join(data_dir_path, 'cache', 'all_video_desc_bertweet_umap_embeddings.npy')
+    embeddings_cache_path = os.path.join(data_dir_path, f'all_video_desc_bertweet_umap_{dim_size}_embeddings.npy')
     with open(embeddings_cache_path, 'rb') as f:
         video_umap_embeddings = np.load(f)
 
@@ -54,8 +55,8 @@ def main():
 
     topics, probs = predictions, topic_model.probabilities_
 
-    this_run_name = f'bertweet_base'
-    run_dir_path = os.path.join(data_dir_path, 'outputs', this_run_name)
+    this_run_name = f'bertweet_base_{dim_size}'
+    run_dir_path = os.path.join(data_dir_path, this_run_name)
     if not os.path.exists(run_dir_path):
         os.mkdir(run_dir_path)
 
