@@ -12,10 +12,10 @@ import tqdm
 import warnings
 warnings.filterwarnings("error")
 
-GLOBAL_CONTENT_SAMPLE = 500
-NEIGHBOUR_CONTENT_SAMPLE = 500
+GLOBAL_CONTENT_SAMPLE = 1000
+NEIGHBOUR_CONTENT_SAMPLE = 1000
 NEIGHBOUR_SAMPLE = 10000
-USER_SAMPLE = 100000
+USER_SAMPLE = 2000000
 MAX_TIME_FRAME = datetime.timedelta(days=7)
 INSTANTANEOUS = False
 NUM_DIMS = 5
@@ -128,20 +128,20 @@ def process_global_data(time_content_df, content_embeddings, last_datetime, inte
 
     return interaction_data
 
-def assert_and_get_viewed_id(user_content, edge_data, time_content_df, viewed_content_user_id, user_id_name, viewed_id_name):
+def assert_and_get_viewed_id(user_id, user_content, edge_data, time_content_df, viewed_content_user_id, user_id_name, viewed_id_name):
     if INSTANTANEOUS:
-        assert user_content.name[1] == edge_data[user_id_name]
+        assert user_content.name[1] == edge_data[user_id_name], f"Failed to get content match for user ID: {user_id}"
     else:
-        assert user_content.iloc[0].name == edge_data[user_id_name]
+        assert user_content.iloc[0].name == edge_data[user_id_name], f"Failed to get content match for user ID: {user_id}"
     viewed_content = time_content_df.xs(viewed_content_user_id, level='author_id', drop_level=False).xs(edge_data[viewed_id_name], level=viewed_id_name, drop_level=False)
     if len(viewed_content) != 1:
         raise ValueError()
     viewed_content = viewed_content.iloc[0]
-    assert viewed_content.name[2] == edge_data[viewed_id_name]
+    assert viewed_content.name[2] == edge_data[viewed_id_name], f"Failed to get content match for user ID: {user_id}"
     viewed_content_index = viewed_content['index']
     return viewed_content_index
 
-def process_interaction(edge_data, user_comments_df, time_comments_df, time_videos_df, comment_embeddings, video_embeddings, first_content_datetime, last_content_datetime, viewed_content_user_id, video_norm, comment_norm, video_comment_cosine_sim, neighbours, second_order_neighbours, third_order_neighbours):
+def process_interaction(user_id, edge_data, user_comments_df, time_comments_df, time_videos_df, comment_embeddings, video_embeddings, first_content_datetime, last_content_datetime, viewed_content_user_id, video_norm, comment_norm, video_comment_cosine_sim, neighbours, second_order_neighbours, third_order_neighbours):
     interaction_timestamp = edge_data['unix_createtime']
     # very annoyed that i have to do this but i messed up times a while back and now have to correct
     interaction_datetime = datetime.datetime.fromtimestamp(interaction_timestamp) + datetime.timedelta(hours=5)
@@ -188,7 +188,7 @@ def process_interaction(edge_data, user_comments_df, time_comments_df, time_vide
         last_datetime = interaction_datetime - MAX_TIME_FRAME
 
         if edge_data['type'] == 'video_comment':
-            viewed_content_index = assert_and_get_viewed_id(user_content, edge_data, time_videos_df, viewed_content_user_id, 'comment_id', 'video_id')
+            viewed_content_index = assert_and_get_viewed_id(user_id, user_content, edge_data, time_videos_df, viewed_content_user_id, 'comment_id', 'video_id')
             viewed_content_embed = video_embeddings[viewed_content_index, :]
 
             # make sure time is exclusive exclusive
@@ -217,7 +217,7 @@ def process_interaction(edge_data, user_comments_df, time_comments_df, time_vide
                 viewed_prev_content_cosine_sim = np.dot(viewed_content_embed, prev_content_embed) / (video_norm[viewed_content_index] * norm_prev_content_embed)
 
         elif edge_data['type'] == 'comment_reply':
-            viewed_content_index = assert_and_get_viewed_id(user_content, edge_data, time_comments_df, viewed_content_user_id, 'comment_id_reply', 'comment_id')
+            viewed_content_index = assert_and_get_viewed_id(user_id, user_content, edge_data, time_comments_df, viewed_content_user_id, 'comment_id_reply', 'comment_id')
             viewed_content_embed = comment_embeddings[viewed_content_index, :]
 
             global_content = time_comments_df.xs(slice(last_datetime, interaction_datetime), level='createtime').iloc[1:-1]

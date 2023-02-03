@@ -21,7 +21,6 @@ def away_metric(other_user_dist, prev_other_dist, user_prev_dist):
     if prev_other_dist != 0:
         dist_from_line = ((other_user_dist + user_prev_dist) / prev_other_dist) - 1
     else:
-        assert other_user_dist == user_prev_dist
         dist_from_line = other_user_dist
     dist_from_line = min(dist_from_line, MAX_EXP)
     return np.e ** (dist_from_line) / (np.e ** (dist_from_line) + 1)
@@ -31,9 +30,10 @@ def main():
     root_dir_path = os.path.join(this_dir_path, '..')
     data_dir_path = os.path.join(root_dir_path, 'data')
 
+    num_dims = 5
     change_type = 'changepoint'
 
-    file_name = f'user_seqs_{change_type}.json'
+    file_name = f'user_seqs_{change_type}_{num_dims}.json'
     user_seq_path = os.path.join(data_dir_path, file_name)
     with open(user_seq_path, 'r') as f:
         user_seqs = json.load(f)
@@ -41,11 +41,13 @@ def main():
     dists = collections.defaultdict(list)
 
     edge_type = 'comment_reply'
-    fig_type = 'dist'
+    fig_type = 'movement'
 
+    num_interactions = 0
     for user_id, user_seq in tqdm(user_seqs.items()):
         for inter in user_seq:
-
+            if len(inter) > 3:
+                num_interactions += 1
             inter_type = inter['edge_data']['type']
             for key, value in inter.items():
                 if 'euclid' in key or 'cosine' in key:
@@ -57,9 +59,10 @@ def main():
                         user_prev_dist = inter[f"prev_user_{key[-key_suffix:]}"]
                         dists[f"{key}_between_{inter_type}"].append(between_metric(other_user_dist, prev_other_dist, user_prev_dist))
                         dists[f"{key}_away_{inter_type}"].append(away_metric(other_user_dist, prev_other_dist, user_prev_dist))
+    print(f"Num interactions: {num_interactions}")
 
     if fig_type == 'dist':
-        fig, axes = plt.subplots(ncols=2, nrows=6, figsize=(20, 10))
+        fig, axes = plt.subplots(ncols=2, nrows=6, figsize=(10, 10))
 
         dist_types = ['prev', 'viewed', 'neighbour', 'second_neighbour', 'third_neighbour', 'global']
         dist_titles = ['Previous', 'Interacted', 'Neighbours', 'Second Order Neighbours', 'Third Order Neighbours', 'Global']
@@ -86,21 +89,21 @@ def main():
         axes[0][1].set_xlabel('Cosine Similarity')
 
     if fig_type == 'movement':
-        fig, axes = plt.subplots(ncols=1, nrows=5, figsize=(5, 15))
+        fig, axes = plt.subplots(ncols=5, nrows=1, figsize=(15, 3))
 
         dist_types = ['viewed', 'neighbour', 'second_neighbour', 'third_neighbour', 'global']
         dist_titles = ['Interacted', 'Neighbours', 'Second Order Neighbours', 'Third Order Neighbours', 'Global']
-        for idx, row in enumerate(axes):
-            row.hist2d(dists[f'{dist_types[idx]}_user_content_euclid_dist_between_{edge_type}'], dists[f'{dist_types[idx]}_user_content_euclid_dist_away_{edge_type}'], bins=int(np.sqrt(NUM_BINS)), density=True)
+        for idx, ax in enumerate(axes):
+            ax.hist2d(dists[f'{dist_types[idx]}_user_content_euclid_dist_between_{edge_type}'], dists[f'{dist_types[idx]}_user_content_euclid_dist_away_{edge_type}'], bins=int(np.sqrt(NUM_BINS)), density=True)
             #row[0].hist(dists[f'{dist_types[idx]}_user_content_euclid_dist_between_{edge_type}'], bins=NUM_BINS, density=True)
-            row.set_title(dist_titles[idx])
+            ax.set_title(dist_titles[idx])
 
         # for idx, row in enumerate(axes):
         #     row[1].hist2d(dists[f'{dist_types[idx]}_user_content_cosine_sim_between_{edge_type}'], dists[f'{dist_types[idx]}_user_content_cosine_sim_away_{edge_type}'], bins=int(np.sqrt(NUM_BINS)), density=True)
         #     #row[1].hist(dists[f'{dist_types[idx]}_user_content_cosine_sim_between_{edge_type}'], bins=NUM_BINS, density=True)
         #     row[1].set_title(dist_titles[idx])
 
-        for ax in (row for row in axes):
+        for ax in axes:
             ax.set_xlim(left=0, right=1)
 
         axes[0].set_ylabel('Away')

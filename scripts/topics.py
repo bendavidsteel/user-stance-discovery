@@ -33,7 +33,7 @@ def main():
     with open(embeddings_cache_path, 'rb') as f:
         video_umap_embeddings = np.load(f)
 
-    umap_embeddings = np.concatenate([comment_umap_embeddings, video_umap_embeddings], axis=1)
+    umap_embeddings = np.concatenate([comment_umap_embeddings, video_umap_embeddings], axis=0)
 
     # Cluster reduced embeddings
     documents, probabilities = topic_model._cluster_embeddings(umap_embeddings, docs)

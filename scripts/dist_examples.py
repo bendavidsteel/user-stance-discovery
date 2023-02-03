@@ -3,16 +3,19 @@ import datetime
 import json
 import os
 
+import adjustText
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
+import dist_hists
+
 EPSILON = 1e-6
 MAX_EXP = 100
 NUM_BINS = 100
 
-def get_dist_example(dist_interval, user_seqs, dist_name, edge_type):
+def get_dist_examples(dist_interval, user_seqs, dist_name, edge_type):
     for user_id, user_seq in user_seqs.items():
         for inter in user_seq:
             if edge_type != inter['edge_data']['type']:
@@ -21,7 +24,24 @@ def get_dist_example(dist_interval, user_seqs, dist_name, edge_type):
                 continue
             rel_dist = inter[dist_name]
             if rel_dist >= dist_interval[0] and rel_dist < dist_interval[1]:
-                return user_id, inter
+                yield user_id, inter
+    else:
+        raise ValueError()
+
+def get_movement_examples(between_interval, away_interval, user_seqs, dist_name, edge_type):
+    for user_id, user_seq in user_seqs.items():
+        for inter in user_seq:
+            if edge_type != inter['edge_data']['type']:
+                continue
+            if dist_name not in inter:
+                continue
+            other_user_dist = inter[dist_name]
+            prev_other_dist = inter[dist_name.replace('user', 'prev')]
+            user_prev_dist = inter[f"prev_user_{dist_name[-19:]}"]
+            between_metric = dist_hists.between_metric(other_user_dist, prev_other_dist, user_prev_dist)
+            away_metric = dist_hists.away_metric(other_user_dist, prev_other_dist, user_prev_dist)
+            if between_metric >= between_interval[0] and between_metric < between_interval[1] and away_metric >= away_interval[0] and away_metric < away_interval[1]:
+                yield user_id, inter
     else:
         raise ValueError()
 
@@ -49,79 +69,121 @@ def get_text(user_id, inter, users_comment_df, users_video_df):
 
     return user_content_text, prev_content_text, viewed_content_text
 
-def _plot_movement(ax, user_id, inter, users_comment_df, users_video_df):
+def try_get_text(user_id, inter, users_comment_df, users_video_df):
     user_content_text, prev_content_text, viewed_content_text = get_text(user_id, inter, users_comment_df, users_video_df)
+
+    min_length = 10
+    if (len(user_content_text) < min_length) and (len(prev_content_text) < min_length) and (len(viewed_content_text) < min_length):
+        return ()
+
+    if user_content_text == prev_content_text:
+        return ()
+
+    return user_content_text, prev_content_text, viewed_content_text
+
+def _plot_movement(ax, inter, user_content_text, prev_content_text, viewed_content_text):
+    max_length = 30
+    user_content_text = user_content_text if len(user_content_text) < max_length else user_content_text[:max_length] + '...'
+    prev_content_text = prev_content_text if len(prev_content_text) < max_length else prev_content_text[:max_length] + '...'
+    viewed_content_text = viewed_content_text if len(viewed_content_text) < max_length else viewed_content_text[:max_length] + '...'
+
+    ax.arrow(inter['prev_content_embed'][0], inter['prev_content_embed'][1], inter['user_content_embed'][0] - inter['prev_content_embed'][0], inter['user_content_embed'][1] - inter['prev_content_embed'][1])
+    ax.plot([inter['user_content_embed'][0], inter['viewed_content_embed'][0]], [inter['user_content_embed'][1], inter['viewed_content_embed'][1]], '--')
+
     ax.plot(*inter['user_content_embed'], 'bo', label='User Content')
-    ax.text(*inter['user_content_embed'], user_content_text)
-
     ax.plot(*inter['prev_content_embed'], 'go', label='Prev Content')
-    ax.text(*inter['prev_content_embed'], prev_content_text)
-
     ax.plot(*inter['viewed_content_embed'], 'ro', label='Interacted Content')
-    ax.text(*inter['viewed_content_embed'], viewed_content_text)
 
-    if 'neighbour_user_content_embed' in inter:
-        ax.plot(*inter['neighbour_user_content_embed'], 'co', label='Neighbour Content')
+    if 'neighbour_content_embed' in inter:
+        ax.plot(*inter['neighbour_content_embed'], 'co', label='Neighbour Content')
 
-    if 'second_neighbour_user_content_embed' in inter:
-        ax.plot(*inter['second_neighbour_user_content_embed'], 'mo', label='Second Order Neighbour Content')
+    if 'second_neighbour_content_embed' in inter:
+        ax.plot(*inter['second_neighbour_content_embed'], 'mo', label='Second Order Neighbour Content')
 
-    if 'third_neighbour_user_content_embed' in inter:
-        ax.plot(*inter['third_neighbour_user_content_embed'], 'yo', label='Third Order Neighbour Content')
+    if 'third_neighbour_content_embed' in inter:
+        ax.plot(*inter['third_neighbour_content_embed'], 'yo', label='Third Order Neighbour Content')
 
     if 'global_content_embed' in inter:
         ax.plot(*inter['global_content_embed'], 'ko', label='Global Content Embed')
 
+    return [(inter['user_content_embed'], user_content_text), (inter['prev_content_embed'], prev_content_text), (inter['viewed_content_embed'], viewed_content_text)]
+
 
 def plot_movement(ax, dist_interval, user_seqs, dist_name, edge_type, users_comment_df, users_video_df):
-    user_id, inter = get_dist_example(dist_interval, user_seqs, dist_name, edge_type)
-    # min dist
-    _plot_movement(ax, user_id, inter, users_comment_df, users_video_df)
+    for user_id, inter in get_dist_examples(dist_interval, user_seqs, dist_name, edge_type):
+        # min dist
+        good = _try_plot_movement(ax, user_id, inter, users_comment_df, users_video_df)
+        if good:
+            return
 
 def plot_dist_examples(fig, dist_name, edge_type, users_comment_df, users_video_df, user_seqs, n, bins):
 
-    dist_interval = (bins[0], bins[1])
-    ax = fig.add_subplot(4, 3, 4)
-    plot_movement(ax, dist_interval, user_seqs, dist_name, edge_type, users_comment_df, users_video_df)
-    ax.legend()
+    first_idx = np.argmax(n != 0)
+    last_idx = (n.shape[0]-1) - np.argmax(n[::-1] != 0)
 
-    # peaks
+    num_cols = 1
+    # peak
     peak_idx = np.argmax(n)
-    dist_interval = (bins[peak_idx], bins[peak_idx+1])
-    ax = fig.add_subplot(4, 3, 7)
-    plot_movement(ax, dist_interval, user_seqs, dist_name, edge_type, users_comment_df, users_video_df)
-
-    # max dist
-    dist_interval = (bins[-2], bins[-1])
-    ax = fig.add_subplot(4, 3, 10)
-    plot_movement(ax, dist_interval, user_seqs, dist_name, edge_type, users_comment_df, users_video_df)
-
-def plot_movement_examples(ax, user_seqs, dists, n, bins, patches):
-    # min dist
-    plot_movement(ax, )
-
-    # peaks
-    for _ in bins:
-        plot_movement(ax, )
-
-    # max dist
-    plot_movement(ax, )
-
-def between_metric(other_user_dist, prev_other_dist, user_prev_dist):
-    # if prev_other_dist != 0:
-    #     return np.clip((user_prev_dist / prev_other_dist) * (user_prev_dist**2 + prev_other_dist**2 - other_user_dist**2) / (2 * user_prev_dist * prev_other_dist), 0, 1)
-    # else:
-    #     return 0
-    return 1 / (1 + (np.e ** (other_user_dist - user_prev_dist)))
-
-def away_metric(other_user_dist, prev_other_dist, user_prev_dist):
-    if prev_other_dist != 0:
-        dist_from_line = ((other_user_dist + user_prev_dist) / prev_other_dist) - 1
+    if (peak_idx != first_idx) and (peak_idx != last_idx):
+        num_rows = 3
+        dist_interval = (bins[peak_idx], bins[peak_idx+1])
+        ax = fig.add_subplot(num_rows, num_cols, num_cols+1)
+        plot_movement(ax, dist_interval, user_seqs, dist_name, edge_type, users_comment_df, users_video_df)
+        ax.set_title('Mode')
     else:
-        assert other_user_dist == user_prev_dist
-        dist_from_line = other_user_dist
-    dist_from_line = min(dist_from_line, MAX_EXP)
-    return np.e ** (dist_from_line) / (np.e ** (dist_from_line) + 1)
+        num_rows = 2
+
+    dist_interval = (bins[first_idx], bins[first_idx+1])
+    ax = fig.add_subplot(num_rows, num_cols, 1)
+    plot_movement(ax, dist_interval, user_seqs, dist_name, edge_type, users_comment_df, users_video_df)
+    ax.legend(bbox_to_anchor=(-0.2, 1))
+    ax.set_title('Least')
+
+    # max dist
+    dist_interval = (bins[last_idx-10], bins[last_idx+1])
+    ax = fig.add_subplot(num_rows, num_cols, (num_rows * num_cols) - num_cols + 1)
+    plot_movement(ax, dist_interval, user_seqs, dist_name, edge_type, users_comment_df, users_video_df)
+    ax.set_title('Most')
+
+def plot_movement_examples(fig, dist_name, edge_type, users_comment_df, users_video_df, user_seqs, n, xbins, ybins):
+
+    top_n = 3
+    num_examples = 3
+    top_n_idx = [
+        [0, 0],
+        [9, 0],
+        [5, 9]
+    ]
+    names = [
+        'Stayed near Previous',
+        'Moved to Interacted',
+        'Moved Away'
+    ]
+    
+    for row_idx, top_idx in enumerate(top_n_idx):
+        between_interval = (xbins[top_idx[0]], xbins[top_idx[0]+1])
+        away_interval = (ybins[top_idx[1]], ybins[top_idx[1]+1])
+        examples_so_far = 0
+        for user_id, inter in get_movement_examples(between_interval, away_interval, user_seqs, dist_name, edge_type):
+            texts = try_get_text(user_id, inter, users_comment_df, users_video_df)
+            if not texts:
+                continue
+            ax_num = examples_so_far + 1 + (row_idx * num_examples)
+            ax = fig.add_subplot(top_n, num_examples, ax_num)
+            # min dist
+            text_pos = _plot_movement(ax, inter, *texts)
+            if ax_num == 1:
+                ax.legend(bbox_to_anchor=(-0.2, 1))
+            if ax_num % num_examples == 2:
+                ax.set_title(names[row_idx])
+            text_plots = []
+            for pos, text in text_pos:
+                text_plots.append(ax.text(*pos, text))
+            adjustText.adjust_text(text_plots)
+            examples_so_far += 1
+            if examples_so_far == num_examples:
+                break
+        
 
 def main():
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
@@ -134,8 +196,8 @@ def main():
 
     dists = collections.defaultdict(list)
 
-    edge_type = 'video_comment'
-    fig_type = 'dist'
+    edge_type = 'comment_reply'
+    fig_type = 'movement'
 
     for user_id, user_seq in tqdm(user_seqs.items()):
         for inter in user_seq:
@@ -149,8 +211,8 @@ def main():
                         other_user_dist = value
                         prev_other_dist = inter[key.replace('user', 'prev')]
                         user_prev_dist = inter[f"prev_user_{key[-key_suffix:]}"]
-                        dists[(key, 'between', inter_type)].append(between_metric(other_user_dist, prev_other_dist, user_prev_dist))
-                        dists[(key, 'away', inter_type)].append(away_metric(other_user_dist, prev_other_dist, user_prev_dist))
+                        dists[(key, 'between', inter_type)].append(dist_hists.between_metric(other_user_dist, prev_other_dist, user_prev_dist))
+                        dists[(key, 'away', inter_type)].append(dist_hists.away_metric(other_user_dist, prev_other_dist, user_prev_dist))
 
     video_desc_path = os.path.join(data_dir_path, 'all_video_desc.csv')
     video_desc_df = pd.read_csv(video_desc_path, dtype={'video_id': str, 'author_id': str})
@@ -171,14 +233,9 @@ def main():
         dist_titles = ['Previous', 'Interacted', 'Neighbours', 'Second Order Neighbours', 'Third Order Neighbours', 'Global']
         for idx in range(len(dist_types)):
             fig = plt.figure(figsize=(15, 10))
-            ax = fig.add_subplot(4, 3, (1,3))
             dist_name = f'{dist_types[idx]}_user_content_euclid_dist'
             dist_key = (dist_name, edge_type)
-            n, bins, patches = ax.hist(dists[dist_key], range=(0, 25), bins=NUM_BINS, density=True)
-            ax.set_title(dist_titles[idx])
-            ax.set_xlim(left=0, right=25)
-            ax.set_ylabel('Density')
-            ax.set_xlabel('Euclidean Distance')
+            n, bins = np.histogram(dists[dist_key], range=(0, 25), bins=NUM_BINS, density=True)
 
             # if dist_types[idx] in ['prev', 'viewed']:
             plot_dist_examples(fig, dist_name, edge_type, users_comment_df, users_video_df, user_seqs, n, bins)
@@ -191,14 +248,9 @@ def main():
 
         for idx in range(len(dist_types)):
             fig = plt.figure(figsize=(15, 10))
-            ax = fig.add_subplot(4, 3, (1,3))
             dist_name = f'{dist_types[idx]}_user_content_cosine_sim'
             dist_key = (dist_name, edge_type)
-            n, bins, patches = ax.hist(dists[dist_key], range=(0, 1), bins=NUM_BINS, density=True)
-            ax.set_title(dist_titles[idx])
-            ax.set_xlim(left=0, right=1)
-            ax.set_ylabel('Density')
-            ax.set_xlabel('Cosine Similarity')
+            n, bins = np.histogram(dists[dist_key], range=(0, 1), bins=NUM_BINS, density=True)
 
             # if dist_types[idx] in ['prev', 'viewed']:
             plot_dist_examples(fig, dist_name, edge_type, users_comment_df, users_video_df, user_seqs, n, bins)
@@ -210,26 +262,21 @@ def main():
             fig.savefig(fig_path)
 
     if fig_type == 'movement':
-        fig, axes = plt.subplots(ncols=1, nrows=5, figsize=(5, 15))
+        fig = plt.figure(figsize=(13, 10))
 
-        dist_types = ['viewed', 'neighbour', 'second_neighbour', 'third_neighbour', 'global']
-        dist_titles = ['Interacted', 'Neighbours', 'Second Order Neighbours', 'Third Order Neighbours', 'Global']
-        for idx, ax in enumerate(axes):
-            h, xedges, yedges, image = ax.hist2d(dists[f'{dist_types[idx]}_user_content_euclid_dist_between_{edge_type}'], dists[f'{dist_types[idx]}_user_content_euclid_dist_away_{edge_type}'], bins=int(np.sqrt(NUM_BINS)), density=True)
-            ax.set_title(dist_titles[idx])
+        dist_type = 'viewed'
+        dist_title = 'Interacted'
+        dist_name = f'{dist_type}_user_content_euclid_dist'
 
-            if dist_types[idx] == 'viewed':
-                plot_movement_examples(ax, dists, n, bins, patches)
+        h, xedges, yedges = np.histogram2d(dists[(f'{dist_type}_user_content_euclid_dist', 'between', edge_type)], dists[(f'{dist_type}_user_content_euclid_dist', 'away', edge_type)], bins=int(np.sqrt(NUM_BINS)), density=True)
 
-        fig_name = f'{edge_type}_movement_hists.png'
+        plot_movement_examples(fig, dist_name, edge_type, users_comment_df, users_video_df, user_seqs, h, xedges, yedges)
 
-        for ax in (row for row in axes):
-            ax.set_xlim(left=0, right=1)
+        plt.tight_layout()
 
-        axes[0].set_ylabel('Away')
-        axes[0].set_xlabel('Between')
-
-    
+        fig_name = f'{edge_type}_movement_examples.png'
+        fig_path = os.path.join(root_dir_path, 'figs', fig_name)
+        fig.savefig(fig_path)
 
 
 if __name__ == '__main__':

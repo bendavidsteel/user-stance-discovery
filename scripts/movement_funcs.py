@@ -28,18 +28,18 @@ def main():
 
     fig, axes = plt.subplots(nrows=1, ncols=2)
 
-    im1 = axes[0].imshow(m_along, extent=(-3, 3, -3, 3))
+    im1 = axes[0].imshow(m_along, vmin=0, vmax=1, extent=(-3, 3, -3, 3))
     axes[0].plot(0, -1, 'ro', label='Prev')
     axes[0].plot(0, 1, 'go', label='Interacted')
     axes[0].set_title('Between')
     axes[0].legend()
 
-    im2 = axes[1].imshow(m_away, extent=(-3, 3, -3, 3))
+    im2 = axes[1].imshow(m_away, vmin=0, vmax=1, extent=(-3, 3, -3, 3))
     axes[1].plot(0, -1, 'ro', label='Prev')
     axes[1].plot(0, 1, 'go', label='Interacted')
     axes[1].set_title('Away')
 
-    plt.tight_layout()
+    # plt.tight_layout()
 
     fig.colorbar(im1, ax=axes.ravel().tolist())
 
