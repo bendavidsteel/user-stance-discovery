@@ -11,6 +11,7 @@ import pyro.distributions.constraints as constraints
 from pyro.generic import distributions as dist
 from pyro.generic import infer, ops, optim, pyro, pyro_backend
 
+import opinions
 
 class InteractionDataset(torch.utils.data.Dataset):
     def __init__(self, data_path, batch=True):
@@ -114,36 +115,6 @@ def uniform_probs_from_mask(mat_mask):
     uniform_probs[vec_mask] = mat_mask[vec_mask] / torch.sum(mat_mask, dim=1, keepdim=True)[vec_mask]
     return uniform_probs
 
-def degroot(user_state, new_content, attention):
-    return user_state + torch.bmm(attention.unsqueeze(1), new_content).squeeze(1)
-
-def friedkin_johnsen(original_user_state, content, stubbornness):
-    return ((1 - stubbornness) * original_user_state) + (stubbornness * torch.sum(content))
-
-def bounded_confidence(user_state, new_content, confidence_interval):
-    diff = user_state - new_content
-    mask = torch.norm(torch.abs(diff), dim=1) > confidence_interval
-    return user_state + ((1 / torch.sum(mask)) * torch.sum(mask * diff))
-
-def stochastic_bounded_confidence_categorical(user_state, new_content, content_mask, exponent):
-    # compares prob of interaction between a number of people
-    unsq_content_mask = content_mask.unsqueeze(2)
-    # we can't use cdist because we can't mask in cdist, and unmasked cdist would be computationally inefficient
-    content_dist = torch.cdist(user_state.unsqueeze(1), new_content * unsq_content_mask).squeeze(1) * content_mask
-
-    vec_mask = content_mask.any(dim=1)
-
-    # TODO use MaskedTensor
-    numerator = torch.pow(content_dist + ((1 - content_mask) * 1), -1 * exponent.unsqueeze(1)) * content_mask
-    probs = torch.zeros(numerator.shape, dtype=torch.float64)
-    probs[vec_mask] = numerator[vec_mask] / torch.sum(numerator, dim=1, keepdims=True)[vec_mask]
-
-    return probs
-
-def stochastic_bounded_confidence_bernoulli(user_state, new_content, exponent, n, avg_content):
-    # compares prob of interaction between a number of people
-    numerator = torch.pow(torch.abs(user_state - new_content), -1 * exponent)
-    return numerator / (numerator + ((n-1) * torch.pow(torch.abs(user_state - avg_content), -1 * exponent)))
 
 def recommend_potential_videos(available_videos, user_history):
     probs = uniform_probs(len(available_videos))
@@ -152,7 +123,7 @@ def recommend_potential_videos(available_videos, user_history):
     return probs
 
 def state_update(user_state, new_content, attention):
-    return degroot(user_state, new_content, attention)
+    return opinions.degroot(user_state, new_content, attention)
 
 def get_video_opinions(video):
     return video.topics
@@ -161,14 +132,14 @@ def get_comments_opinions(comments):
     return [comment.topic for comment in comments]
 
 def get_choose_video_probs(recommended_video, user_state, diff_weight, n, avg_content):
-    content_probs = stochastic_bounded_confidence_bernoulli(user_state, recommended_video, diff_weight, n, avg_content)
+    content_probs = opinions.stochastic_bounded_confidence_bernoulli(user_state, recommended_video, diff_weight, n, avg_content)
     # TODO add social probs
     # social_probs = None
     # return (social_coef * social_probs) + ((1 - social_coef) * content_probs)
     return content_probs
 
 def choose_comment(comments, comment_mask, user_state, diff_weight):
-    content_probs = stochastic_bounded_confidence_categorical(user_state, comments, comment_mask, diff_weight)
+    content_probs = opinions.stochastic_bounded_confidence_categorical(user_state, comments, comment_mask, diff_weight)
     # TODO add social probs
     # social_probs = None
     # return (social_coef * social_probs) + ((1 - social_coef) * content_probs)
