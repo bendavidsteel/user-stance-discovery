@@ -23,10 +23,12 @@ def check_english(text):
         else:
             raise Exception('Unknown error')
 
-def load_comments_df():
-    
+def get_data_dir_path():
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
     data_dir_path = os.path.join(this_dir_path, '..', 'data')
+
+def load_tiktok_comments_df():
+    data_dir_path = get_data_dir_path()
 
     df_path = os.path.join(data_dir_path, 'all_comments.csv')
     comment_dir_path = os.path.join(this_dir_path, '..', '..', 'polar-seeds', 'data', 'comments')
@@ -55,21 +57,41 @@ def load_comments_df():
 
     return english_comments_df
 
+def load_reddit_comments_df():
+    data_dir_path = get_data_dir_path()
+
+    df_path = os.path.join(data_dir_path, 'worldnews_2022-01.csv')
+    df = pd.read_csv(df_path)
+
+    return df
+
 def main():
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
     data_dir_path = os.path.join(this_dir_path, '..', 'data')
 
-    df_path = os.path.join(data_dir_path, 'all_english_comments.csv')
+    platform = 'reddit'
+
+    df_path = os.path.join(data_dir_path, f'all_english_{platform}_comments.csv')
     if not os.path.exists(df_path):
-        final_comments_df = load_comments_df()
+        if platform == 'tiktok':
+            final_comments_df = load_tiktok_comments_df()
+            text_column = 'text_processed'
+        elif platform == 'reddit':
+            final_comments_df = load_reddit_comments_df()
+            text_processed = 'text'
         final_comments_df.to_csv(df_path)
 
     final_comments_df = pd.read_csv(df_path)
 
-    docs = list(final_comments_df['text_processed'].values)
+    docs = list(final_comments_df[text_column].values)
 
     # Train the model on the corpus.
-    pretrained_model = 'vinai/bertweet-base'
+    if platform == 'tiktok':
+        model_name = 'bertweet'
+        pretrained_model = 'vinai/bertweet-base'
+    elif platform == 'reddit':
+        model_name = 'bert'
+        pretrained_model = 'bert'
 
     topic_model = BERTopic(embedding_model=pretrained_model)
 
@@ -77,7 +99,7 @@ def main():
 
     #if not os.path.exists(model_path):
     # get embeddings so we can cache
-    embeddings_cache_path = os.path.join(data_dir_path, 'all_english_comment_bertweet_embeddings.npy')
+    embeddings_cache_path = os.path.join(data_dir_path, f'all_english_{platform}_comment_{model_name}_embeddings.npy')
     topic_model.embedding_model = select_backend(pretrained_model,
                                     language=topic_model.language)
     topic_model.embedding_model.embedding_model.max_seq_length = 128

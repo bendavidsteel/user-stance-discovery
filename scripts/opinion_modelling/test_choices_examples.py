@@ -4,7 +4,7 @@ import torch
 
 import pyro
 
-import model_choices
+import scripts.opinion_modelling.discriminative as discriminative
 
 def test_choices_examples():
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
@@ -15,13 +15,13 @@ def test_choices_examples():
     pin_memory = False
     shuffle = True
 
-    inter_dataset = model_choices.InteractionDataset(data_path)
+    inter_dataset = discriminative.InteractionDataset(data_path)
     inter_dataloader = torch.utils.data.DataLoader(inter_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory)
 
     pyro.enable_validation(True)
     pyro.set_rng_seed(1)
 
-    trainer = model_choices.get_trainer(model_choices.choose_reply_comment)#, guide=choose_reply_comment_guide)
+    trainer = discriminative.get_trainer(discriminative.choose_reply_comment)#, guide=choose_reply_comment_guide)
 
     example_seqs = [[0, 1]]
 

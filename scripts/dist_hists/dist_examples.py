@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-import dist_hists
+import scripts.degree_hists.dist_hists as dist_hists
 
 EPSILON = 1e-6
 MAX_EXP = 100
