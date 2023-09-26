@@ -4,7 +4,7 @@ import os
 
 from tqdm import tqdm
 
-import dist_hists
+import scripts.degree_hists.dist_hists as dist_hists
 
 def main():
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
