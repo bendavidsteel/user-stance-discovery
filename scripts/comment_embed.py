@@ -99,7 +99,7 @@ def main():
 
     #if not os.path.exists(model_path):
     # get embeddings so we can cache
-    embeddings_cache_path = os.path.join(data_dir_path, f'all_english_{platform}_comment_{model_name}_embeddings.npy')
+    embeddings_cache_path = os.path.join(data_dir_path, f'{platform}_comment_{model_name}_embeddings.npy')
     topic_model.embedding_model = select_backend(pretrained_model,
                                     language=topic_model.language)
     topic_model.embedding_model.embedding_model.max_seq_length = 128
