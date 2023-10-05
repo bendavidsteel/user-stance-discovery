@@ -7,10 +7,10 @@ import tqdm
 
 from pyro.generic import infer, optim, pyro_backend, pyro
 
+import datasets
+import generative
 import discriminative
 
-
-    
 def get_trainer(model_func, guide=None):
     if guide is None:
         guide = infer.autoguide.AutoDelta(model_func)
@@ -72,7 +72,14 @@ def main():
     pin_memory = False
     shuffle = False
 
-    dataset = InteractionDataset(data_path)
+    dataset_type = 'generative'
+    if dataset_type == 'generative':
+        dataset = datasets.GenerativeDataset(generative.SocialGenerativeModel)
+    elif dataset_type == 'reddit':
+        dataset = datasets.RedditInteractionDataset(data_path)
+    elif dataset_type == 'tiktok':
+        dataset = datasets.TikTokInteractionDataset(data_path)
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
         sampler=torch.utils.data.BatchSampler(

@@ -5,7 +5,7 @@ import pyro.distributions.constraints as constraints
 from pyro.generic import distributions as dist
 from pyro.generic import pyro
 
-import scripts.opinion_modelling.opinions as opinions
+import opinions
 
 def uniform_probs(num):
     return torch.full((num,), 1 / num)

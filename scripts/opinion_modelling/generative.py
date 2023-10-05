@@ -76,6 +76,23 @@ class SocialPlatform:
                 idx_to_ids[i] = {idx: id for idx, id in enumerate(comments.index.values)}
 
         return comment_positions, comment_mask, idx_to_ids
+    
+    def get_post_recommended_comment_positions(self, post_ids, limit=5):
+        comments_dfs = self.get_post_comments(post_ids, limit=None)
+        if len(comments_dfs) == 0:
+            return torch.zeros(len(post_ids), limit, 2), torch.zeros(len(post_ids), limit), [{} for _ in range(len(post_ids))]
+        
+        comment_positions = torch.zeros(len(post_ids), limit, 2)
+        comment_mask = torch.zeros(len(post_ids), limit)
+        idx_to_ids = [{} for _ in range(len(post_ids))]
+        for i, comments in enumerate(comments_dfs):
+            comment_mask[i, :len(comments)] = 1
+            if len(comments) > 0:
+                recent_comments = comments.sort_values(by='time', ascending=False)
+                comment_positions[i] = torch.stack([t for t in recent_comments['position'].values])
+                idx_to_ids[i] = {idx: id for idx, id in enumerate(recent_comments.index.values)}
+
+        return comment_positions, comment_mask, idx_to_ids
 
     
     def get_comments(self):
@@ -104,6 +121,13 @@ class SocialPlatform:
             posts = self.posts
         idx_to_id = {idx: id for idx, id in enumerate(posts.index.values)}
         return torch.stack([t for t in posts['position'].values]), idx_to_id
+    
+    def get_recommended_posts_positions(self, limit=5):
+        # TODO more complex recommendation algorithm
+        posts = self.posts.sort_values(by='time', ascending=False)
+        if limit is not None:
+            posts = posts[:limit]
+        return torch.stack([t for t in posts['position'].values]), {idx: id for idx, id in enumerate(posts.index.values)}
 
     def update(self, time_step):
         post_period = 10

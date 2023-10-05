@@ -3,9 +3,12 @@ import os
 import numpy as np
 import pandas as pd
 import torch
+import tqdm
 
 class SocialDataset(torch.utils.data.Dataset):
-    def __init__(self, user_df, posts_df, comments_df, post_opinions, comment_opinions):
+    def __init__(self, user_df, posts_df, comments_df, post_opinions, comment_opinions, batch=True):
+        self.batch = batch
+
         self.user_df = user_df
         self.posts_df = posts_df
         self.comments_df = comments_df
@@ -27,15 +30,14 @@ class SocialDataset(torch.utils.data.Dataset):
         post_comments = pd.concat([self.posts_comments_df.get_group(post_id) for post_id in post_ids])
         # get only level 1 comments
         base_comments = post_comments[post_comments['reply_comment_id'].isna()]
-        comment_opinions = self.comments_topic_probs[base_comments.index.values]
+        comment_opinions = self.comment_opinions[base_comments.index.values]
 
         if self.batch:
             num_users = len(users)
             max_comment_seq = comments[['author_id', 'comment_id']].groupby('author_id').count().max().values[0]
             max_base_comments = base_comments[['post_id', 'comment_id']].groupby('post_id').count().max().values[0]
             
-            # add on 0s vec as null comment
-            raise Exception("Zero vec as null comment doesn't make sense, as embeddings are not necessarily centred around zero")
+            # add post opinions in front of comment opinions as default option for replying to a post
             padded_comment_opinions = np.zeros((num_users, max_comment_seq, max_base_comments + 1, comment_opinions.shape[1]))
             mask_comment_opinions = np.zeros((num_users, max_comment_seq, max_base_comments + 1,))
             reply_comment = np.zeros((num_users, max_comment_seq), dtype=np.int64)
@@ -44,12 +46,19 @@ class SocialDataset(torch.utils.data.Dataset):
             for i, user_id in enumerate(users['author_id']):
                 comments = self.user_comments_df.get_group(user_id)
                 for j, (comment_idx, comment) in enumerate(comments.iterrows()):
+                    # get post
+                    post = self.posts_df[self.posts_df['post_id'] == comment['post_id']]
+                    assert len(post) == 1
+                    post = post.iloc[0]
+                    post_opinions = self.post_opinions[post['post_id']]
+
                     # get all comments for post
                     post_comments = self.posts_comments_df.get_group(comment['post_id'])
                     base_comments = post_comments[post_comments['reply_comment_id'].isna()]
-                    comment_opinions = self.comments_topic_probs[base_comments.index.values]
+                    comment_opinions = self.comment_opinions[base_comments.index.values]
 
                     # fill in the comment opinions
+                    padded_comment_opinions[i, j, 0, :] = post_opinions
                     padded_comment_opinions[i, j, 1:comment_opinions.shape[0]+1, :] = comment_opinions
                     mask_comment_opinions[i, j, :comment_opinions.shape[0]+1] = 1
 
@@ -82,17 +91,14 @@ class SocialDataset(torch.utils.data.Dataset):
 
 
 class GenerativeDataset(SocialDataset):
-    def __init__(self, model_creator):
-        num_people = 1000
+    def __init__(self, model_creator, num_people=1000, max_time_step=1000):
         generative_model = model_creator(num_users=num_people)
-        max_time_step = 1000
 
         time_step = 0
         generative_model.reset()
 
-        while self.time_step < max_time_step:
-            generative_model.update(self.time_step)
-            time_step += 1
+        for time_step in tqdm.tqdm(range(max_time_step)):
+            generative_model.update(time_step)
 
         comments_df = generative_model.platform.comments
         posts_df = generative_model.platform.posts
@@ -116,6 +122,8 @@ class TikTokInteractionDataset(SocialDataset):
         videos_df = pd.read_csv(os.path.join(data_path, 'sample_videos.csv'), dtype={'author_name': str, 'author_id': str, 'video_id': str, 'share_video_id': str, 'share_video_user_id': str})
         videos_df = videos_df.loc[:, ~videos_df.columns.str.contains('^Unnamed')]
         videos_df['createtime'] = pd.to_datetime(videos_df['createtime'])
+
+        users_df = pd.read_csv(os.path.join(data_path, 'sample_users.csv'), dtype={'author_name': str, 'author_id': str})
         
         # TODO switch from topic probs to embedding
         topic_probs = np.load(os.path.join(data_path, 'probs.npy'))
