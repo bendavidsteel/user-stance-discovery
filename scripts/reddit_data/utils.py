@@ -12,12 +12,13 @@ def get_comment_df():
 
     comments_dir_path = os.path.join(data_dir_path, 'processed_comments')
     comment_df = None
-    for file_name in os.listdir(comments_dir_path):
-        file_df = pd.read_parquet(os.path.join(comments_dir_path, file_name), columns=['body'])
-        if comment_df is None:
-            comment_df = file_df
-        else:
-            comment_df = pd.concat([comment_df, file_df])
+    for file_name in sorted(os.listdir(comments_dir_path)):
+        if file_name.startswith('canada_comments_filtered'):
+            file_df = pd.read_parquet(os.path.join(comments_dir_path, file_name), columns=['body'])
+            if comment_df is None:
+                comment_df = file_df
+            else:
+                comment_df = pd.concat([comment_df, file_df])
 
     return comment_df
 
@@ -26,11 +27,12 @@ def get_submission_df():
 
     submissions_dir_path = os.path.join(data_dir_path, 'processed_submissions')
     submission_df = None
-    for file_name in os.listdir(submissions_dir_path):
-        file_df = pd.read_parquet(os.path.join(submissions_dir_path, file_name), columns=['title', 'selftext'])
-        if submission_df is None:
-            submission_df = file_df
-        else:
-            submission_df = pd.concat([submission_df, file_df])
+    for file_name in sorted(os.listdir(submissions_dir_path)):
+        if file_name.startswith('canada_submissions_filtered'):
+            file_df = pd.read_parquet(os.path.join(submissions_dir_path, file_name), columns=['title', 'selftext'])
+            if submission_df is None:
+                submission_df = file_df
+            else:
+                submission_df = pd.concat([submission_df, file_df])
 
     return submission_df

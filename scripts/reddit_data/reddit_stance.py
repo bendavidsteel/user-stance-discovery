@@ -1,91 +1,127 @@
+import json
 import os
 
-import pandas as pd
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import numpy as np
+import tqdm
 
 import utils
+import lm
 
 class StanceClassifier:
-    def __init__(self, targets):
-        self.prompt = """<s>[INST] What is the attitude of the sentence: "{text}" to the target "{target}". Response only with a selection from "favor", "against" or "neutral" [/INST]</s>"""
+    def __init__(self, model_name='mistral'):
+        self.prompt = """What is the attitude of the sentence: "{text}" to the target "{target}". Response only with a selection from "favor", "against" or "neutral" """
 
-        # TODO extend with CoT and 1 shot
-
-        self.device = "cuda" # the device to load the model onto
-
-        self.model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
-        # convert to fp16
-        self.model = self.model.half()
-        self.model.to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
-
-        # example
-        # text = "<s>[INST] What is your favourite condiment? [/INST]"
-        # "Well, I'm quite partial to a good squeeze of fresh lemon juice. It adds just the right amount of zesty flavour to whatever I'm cooking up in the kitchen!</s> "
-        # "[INST] Do you have mayonnaise recipes? [/INST]"
-
-        self.targets = targets
+        if model_name == 'mistral':
+            self.model = lm.Mistral()
+        elif model_name == 'zephyr':
+            self.model = lm.Zephyr()
 
     def _get_model_response(self, prompts):
-        encodeds = self.tokenizer(prompts, return_tensors="pt", add_special_tokens=False)
-
-        model_inputs = encodeds.to(self.device)
-
-        generated_ids = self.model.generate(**model_inputs, max_new_tokens=1000, do_sample=True)
-        decoded = self.tokenizer.batch_decode(generated_ids[:,model_inputs['input_ids'].shape[1]:])
-        return decoded
+        response = self.model(prompts)
+        return response
 
     def _predict_stance(self, texts, target):
         prompts = [self.prompt.format(text=text, target=target) for text in texts]
-        if len(prompts) == 1:
-            prompts = prompts[0]
-        else:
-            raise NotImplementedError("Batched inference not implemented yet")
     
-        response = self._get_model_response(prompts)
+        responses = self._get_model_response(prompts)
 
-        if len(response) == 1:
-            response = response[0]
+        responses = [response.strip().lower() for response in responses]
 
-        response = response.strip().lower()
+        def parse_response(r):
+            stances = ['favor', 'against', 'neutral']
+            for stance in stances:
+                if stance in r:
+                    return stance
+                
+            return 'error'
+        
+        responses = [parse_response(r) for r in responses]
 
-        if "favor" in response:
-            response = "favor"
-        elif "against" in response:
-            response = "against"
-        elif "neutral" in response:
-            response = "neutral"
+        return responses
 
-        return response
-
-    def predict_stances(self, texts):
-        return [self._predict_stance(texts, target) for target in self.targets]
+    def predict_stances(self, texts, target):
+        return self._predict_stance(texts, target)
 
 def main():
-    batch_size = 1
+    batch_size = 2
 
-    targets = ['vaccine', 'covid', 'mask', 'lockdown', 'social distancing']
-    stance_classifier = StanceClassifier(targets)
+    topic_stances = [
+        (1, 'vaccine mandates'),
+        (2, 'government response to protests'),
+        (3, 'government response to rising housing costs'),
+        (4, 'banning firearms'),
+        (5, 'government action on healthcare'),
+        (6, 'supporting ukraine'),
+        ([7, 13], ['support conservatives', 'support liberals', 'support NDP']),
+        (10, 'trudeau'),
+        (12, 'government action on inflation'),
+        (14, 'drug legalization'),
+        (16, 'lgbtq+ rights'),
+        (17, 'french language mandates'),
+        (20, 'police actions'),
+        (21, 'mask mandates'),
+        (22, 'electric vehicles'),
+        (23, 'carbon tax'),
+        (24, 'reproductive rights'),
+        (25, 'government policy on china')
+    ]
 
-    data_dir_path = utils.get_data_dir_path()
+    sample_frac = None
+
+    # Load the data.
     comment_df = utils.get_comment_df()
-
-    for i in range(0, len(comment_df), batch_size):
-        comment_batch = comment_df[i:min(i+batch_size, len(comment_df))]
-        stances_batch = stance_classifier.predict_stances(comment_batch['body'].values)
-        comment_df.loc[i:min(i+batch_size, len(comment_df)), targets] = stances_batch
-
-    comment_df.to_parquet(os.path.join(data_dir_path, 'processed_comments_stance.parquet.gzip'), compression='gzip', index=False)
-
     submission_df = utils.get_submission_df()
 
     submission_df['all_text'] = submission_df['title'] + ' ' + submission_df['selftext']
 
-    for i in range(0, len(submission_df), batch_size):
-        submission_batch = submission_df[i:min(i+batch_size, len(submission_df))]
-        stances_batch = stance_classifier.predict_stances(submission_batch['all_text'].values)
-        submission_df.loc[i:min(i+batch_size, len(submission_df)), targets] = stances_batch
+    docs = list(comment_df['body'].values) + list(submission_df['all_text'].values)
+    
+    this_dir_path = os.path.dirname(os.path.abspath(__file__))
+    data_dir_path = os.path.join(this_dir_path, '..', '..', 'data', 'reddit', '1sub_1year')
 
+    run_dir_path = os.path.join(data_dir_path, 'topics_minilm_0_2')
+
+    with open(os.path.join(run_dir_path, 'topics.json'), 'r') as f:
+        doc_topics = json.load(f)
+
+    stance_classifier = StanceClassifier()
+
+    for topics, stances in topic_stances:
+
+        print(f"Predicting stances for topics: {topics}")
+
+        if isinstance(topics, int):
+            topics = [topics]
+        if isinstance(stances, str):
+            stances = [stances]
+
+        comment_topic_idxs = np.array([idx for idx, topic in enumerate(doc_topics[:len(comment_df)]) if topic in topics])
+        # sort idxs by length of comment
+        comment_topic_idxs = comment_topic_idxs[np.argsort(comment_df.iloc[comment_topic_idxs]['body'].apply(len).values)]
+
+        submission_topic_idxs = np.array([idx for idx, topic in enumerate(doc_topics[len(comment_df):]) if topic in topics])
+        # sort idxs by length of submission
+        submission_topic_idxs = submission_topic_idxs[np.argsort(submission_df.iloc[submission_topic_idxs]['all_text'].apply(len).values)]
+
+        for stance in stances:
+            print(f"Predicting stance for {stance}")
+            print("Predicting stance for comments")
+            comment_df[stance] = 'unknown'
+            for i in tqdm.tqdm(range(0, len(comment_topic_idxs), batch_size)):
+                comment_batch_idxs = comment_topic_idxs[i:min(i+batch_size, len(comment_topic_idxs))]
+                comment_batch = comment_df.iloc[comment_batch_idxs]
+                stances_batch = stance_classifier.predict_stances(comment_batch['body'].values, stance)
+                comment_df.iloc[comment_batch_idxs, comment_df.columns.get_loc(stance)] = stances_batch
+
+            print("Predicting stance for submissions")
+            submission_df[stance] = 'unknown'
+            for i in tqdm.tqdm(range(0, len(submission_topic_idxs), batch_size)):
+                submission_batch_idxs = submission_topic_idxs[i:min(i+batch_size, len(submission_topic_idxs))]
+                submission_batch = submission_df.iloc[submission_batch_idxs]
+                stances_batch = stance_classifier.predict_stances(submission_batch['all_text'].values, stance)
+                submission_df.iloc[submission_batch_idxs, submission_df.columns.get_loc(stance)] = stances_batch
+
+    comment_df.to_parquet(os.path.join(data_dir_path, 'processed_comments_stance.parquet.gzip'), compression='gzip', index=False)
     submission_df.to_parquet(os.path.join(data_dir_path, 'processed_submissions_stance.parquet.gzip'), compression='gzip', index=False)
     
 if __name__ == '__main__':

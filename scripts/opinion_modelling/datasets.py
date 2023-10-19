@@ -38,10 +38,10 @@ class SocialDataset(torch.utils.data.Dataset):
             max_base_comments = base_comments[['post_id', 'comment_id']].groupby('post_id').count().max().values[0]
             
             # add post opinions in front of comment opinions as default option for replying to a post
-            padded_comment_opinions = np.zeros((num_users, max_comment_seq, max_base_comments + 1, comment_opinions.shape[1]))
-            mask_comment_opinions = np.zeros((num_users, max_comment_seq, max_base_comments + 1,))
-            reply_comment = np.zeros((num_users, max_comment_seq), dtype=np.int64)
-            actual_comment = np.zeros((num_users, max_comment_seq, comment_opinions.shape[1]))
+            padded_reply_opinions = np.zeros((num_users, max_comment_seq, max_base_comments + 1, comment_opinions.shape[1]))
+            mask_reply_opinions = np.zeros((num_users, max_comment_seq, max_base_comments + 1,))
+            chosen_reply_idx = np.zeros((num_users, max_comment_seq), dtype=np.int64)
+            user_comment_opinions = np.zeros((num_users, max_comment_seq, comment_opinions.shape[1]))
 
             for i, user_id in enumerate(users['author_id']):
                 comments = self.user_comments_df.get_group(user_id)
@@ -58,9 +58,9 @@ class SocialDataset(torch.utils.data.Dataset):
                     comment_opinions = self.comment_opinions[base_comments.index.values]
 
                     # fill in the comment opinions
-                    padded_comment_opinions[i, j, 0, :] = post_opinions
-                    padded_comment_opinions[i, j, 1:comment_opinions.shape[0]+1, :] = comment_opinions
-                    mask_comment_opinions[i, j, :comment_opinions.shape[0]+1] = 1
+                    padded_reply_opinions[i, j, 0, :] = post_opinions
+                    padded_reply_opinions[i, j, 1:comment_opinions.shape[0]+1, :] = comment_opinions
+                    mask_reply_opinions[i, j, :comment_opinions.shape[0]+1] = 1
 
                     # fill in the reply comment
                     if not isinstance(comment['reply_comment_id'], str) and np.isnan(comment['reply_comment_id']):
@@ -72,21 +72,21 @@ class SocialDataset(torch.utils.data.Dataset):
                         # adding 1 because we append the null comment zero vector at the start
                         reply_comment_idx = np.where(base_comments.index.values == all_comments_reply_idx)[0][0] + 1
 
-                    reply_comment[i, j] = reply_comment_idx
+                    chosen_reply_idx[i, j] = reply_comment_idx
 
                     # fill in the actual comment
-                    actual_comment[i, j, :] = self.comments_topic_probs[comment_idx]
+                    user_comment_opinions[i, j, :] = self.comment_opinions[comment_idx]
         else:
             raise NotImplementedError()
-            padded_comment_opinions = np.zeros((len(base_comments) + 1, comment_opinions.shape[1]))
-            padded_comment_opinions[1:comment_opinions.shape[0]+1,:] = comment_opinions
-            mask_comment_opinions = np.ones((len(base_comments) + 1,))
+            padded_reply_opinions = np.zeros((len(base_comments) + 1, comment_opinions.shape[1]))
+            padded_reply_opinions[1:comment_opinions.shape[0]+1,:] = comment_opinions
+            mask_reply_opinions = np.ones((len(base_comments) + 1,))
 
         return {
-            'padded_comments_opinions': torch.tensor(padded_comment_opinions),
-            'mask_comments_opinions': torch.tensor(mask_comment_opinions),
-            'reply_comment': torch.tensor(reply_comment),
-            'actual_comment': torch.tensor(actual_comment),
+            'padded_reply_opinions': torch.tensor(padded_reply_opinions),
+            'mask_reply_opinions': torch.tensor(mask_reply_opinions),
+            'chosen_reply_idx': torch.tensor(chosen_reply_idx),
+            'user_comment_opinions': torch.tensor(user_comment_opinions),
         }
 
 
@@ -104,10 +104,19 @@ class GenerativeDataset(SocialDataset):
         posts_df = generative_model.platform.posts
         user_df = generative_model.users
 
-        post_opinions = generative_model.platform.get_post_positions()
-        comment_opinions = generative_model.platform.get_comment_positions()
+        comments_df = comments_df.reset_index()
+        posts_df = posts_df.reset_index()
+        user_df = user_df.reset_index()
+        user_df = user_df[['index']]
 
-        self.__init__(user_df, posts_df, comments_df, post_opinions, comment_opinions)
+        comments_df.columns = ['comment_id', 'opinions', 'post_id', 'reply_comment_id', 'createtime']
+        posts_df.columns = ['post_id', 'opinions', 'createtime']
+        user_df.columns = ['author_id']
+
+        post_opinions = generative_model.platform.get_posts_positions()
+        comment_opinions = generative_model.platform.get_comments_positions()
+
+        super().__init__(user_df, posts_df, comments_df, post_opinions, comment_opinions)
 
 
 class TikTokInteractionDataset(SocialDataset):

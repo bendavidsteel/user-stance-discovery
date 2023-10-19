@@ -22,27 +22,29 @@ class SocialPlatform:
         self.content_idx += 1
         return id
 
-    def create_post(self, time_step, pos):
+    def create_post(self, user_id, time_step, pos):
         id = self.get_id()
         new_post = {
+            'user_id': user_id,
             'position': pos,
             'time': time_step
         }
         self.posts = pd.concat([self.posts, pd.DataFrame([new_post], index=[id])])
         self.interactions.add_node(id)
 
-    def create_comment(self, time_step, post_id, pos, comment_id=None):
+    def create_comment(self, user_id, time_step, post_id, pos, reply_comment_id=None):
         id = self.get_id()
         new_comment = {
+            'user_id': user_id,
             'position': pos,
-            'post': post_id,
-            'comment': comment_id,
+            'post_id': post_id,
+            'reply_comment_id': reply_comment_id,
             'time': time_step
         }
         self.comments = pd.concat([self.comments, pd.DataFrame([new_comment], index=[id])])
         self.interactions.add_edge(id, post_id)
-        if comment_id is not None:
-            self.interactions.add_edge(id, comment_id)
+        if reply_comment_id is not None:
+            self.interactions.add_edge(id, reply_comment_id)
 
     def get_post_comments(self, post_ids, limit):
         all_comments = []
@@ -242,10 +244,52 @@ class SocialGenerativeModel:
         if not to_post.any():
             return
         users_to_post = self.users[to_post.numpy()]
+        users_to_post_ids = users_to_post.index.values
         users_to_post_positions = torch.stack([pos for pos in users_to_post['position']])
         content_distributions = torch.distributions.MultivariateNormal(users_to_post_positions, self.content_scale * torch.eye(users_to_post_positions.shape[1]))
         post_contents = content_distributions.sample()
-        [self.platform.create_post(time_step, post_content) for post_content in post_contents]
+        [
+            self.platform.create_post(user_id, time_step, post_content)
+            for user_id, post_content 
+            in zip(users_to_post_ids, post_contents)
+        ]
+
+    def create_comments(self, time_step, chosen_post_ids, chosen_content_ids):
+        self._create_comments(time_step, chosen_post_ids, chosen_content_ids, 1 / (self.num_users * 2))
+
+    def _create_comments(self, time_step, chosen_post_ids, chosen_content_ids, prob_threshold):
+        to_comment = torch.distributions.Uniform(0., 1.).sample((self.num_users,)) < prob_threshold
+        if not to_comment.any():
+            return
+        
+        users_pos = self.get_users_positions()
+
+        # TODO fix for only some users commenting
+        # TODO currently users choose from all posts, they should be restricted, either randomly, or by a recommendation algorithm, or by social influence
+        # let users choose the post they want to interact with
+        post_diff, chosen_post_ids = self.choose_post()
+        post_attention = self.get_users_tensor('post_attention').unsqueeze(1) # TODO replace with influence graph
+        users_pos += post_attention * post_diff
+
+        # let users choose the comments they want to interact with
+        # TODO let social influence have an effect on comment choice too
+        comments_diff, chosen_content_ids = self.choose_comment(chosen_post_ids)
+        users_pos += comments_diff
+        
+        users_to_comment = self.users[to_comment.numpy()]
+        users_to_comment_ids = users_to_comment.index.values
+        users_to_comment_positions = torch.stack([pos for pos in users_to_comment['position']])
+
+        comment_distributions = torch.distributions.MultivariateNormal(users_to_comment_positions, self.content_scale * torch.eye(users_to_comment_positions.shape[1]))
+        comment_positions = comment_distributions.sample()
+
+        [
+            self.platform.create_comment(user_id, time_step, chosen_post_idx, comment_pos, comment_id=chosen_comment_idx)
+            for user_id, chosen_post_idx, chosen_comment_idx, comment_pos 
+            in zip(users_to_comment_ids, chosen_post_ids, chosen_content_ids, comment_positions)
+        ]
+
+        return users_pos
 
     def choose_post(self):
         if self.platform.num_posts() != 0:
@@ -321,19 +365,9 @@ class SocialGenerativeModel:
 
         if self.platform.num_posts() == 0:
             return
-
-        users_pos = self.get_users_positions()
-
-        # TODO currently users choose from all posts, they should be restricted, either randomly, or by a recommendation algorithm, or by social influence
-        # let users choose the post they want to interact with
-        post_diff, chosen_post_ids = self.choose_post()
-        post_attention = self.get_users_tensor('post_attention').unsqueeze(1)
-        users_pos += post_attention * post_diff
-
-        # let users choose the comments they want to interact with
-        # TODO let social influence have an effect on comment choice too
-        comments_diff, chosen_content_ids = self.choose_comment(chosen_post_ids)
-        users_pos += comments_diff
+        
+        # create user comments
+        users_pos = self.create_comments(time_step)
     
         # update user positions
         sus = self.get_users_tensor('sus').view(-1, 1)
@@ -341,16 +375,6 @@ class SocialGenerativeModel:
         new_users_pos = (sus * users_pos) + ((1 - sus) * initial_pos)
 
         self.users['position'] = [pos for pos in new_users_pos]
-
-        # create user comments
-        comment_distributions = torch.distributions.MultivariateNormal(new_users_pos, self.content_scale * torch.eye(new_users_pos.shape[1]))
-        comment_positions = comment_distributions.sample()
-
-        [
-            self.platform.create_comment(time_step, chosen_post_idx, comment_pos, comment_id=chosen_comment_idx)
-            for chosen_post_idx, chosen_comment_idx, comment_pos 
-            in zip(chosen_post_ids, chosen_content_ids, comment_positions)
-        ]
 
 
 def evaluate_user_polarization(users):
