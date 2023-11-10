@@ -1,4 +1,15 @@
+import numpy as np
 import torch
+
+def sliding_window(opinion_sequences, halflife):
+    opinions = []
+    for opinion_sequence in opinion_sequences:
+        num_points = opinion_sequence.shape[0]
+        alpha = 1 - np.exp(-np.log(2) / halflife)
+        attention_vector = np.array([(1 - alpha) ** i for i in range(num_points)])
+        opinion = np.sum(opinion_sequence * attention_vector, axis=0) / np.sum(attention_vector, axis=0)
+        opinions.append(opinion)
+    return opinions
 
 def degroot(user_state, new_content, attention):
     return user_state + torch.bmm(attention.unsqueeze(1), new_content).squeeze(1)

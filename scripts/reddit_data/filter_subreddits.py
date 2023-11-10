@@ -1,4 +1,5 @@
 import os
+import re
 
 import pandas as pd
 
@@ -11,7 +12,7 @@ def main():
 
     comments_dir_path = os.path.join(data_dir_path, 'processed_comments')
     for filename in os.listdir(comments_dir_path):
-        if filename.startswith('canada_comments'):
+        if re.match(r'canada_comments_\d{4}-\d{2}.parquet.gzip', filename):
             file_path = os.path.join(comments_dir_path, filename)
             df = pd.read_parquet(file_path)
             df = df[df['subreddit'].isin(subreddits)]
@@ -21,7 +22,7 @@ def main():
 
     submissions_dir_path = os.path.join(data_dir_path, 'processed_submissions')
     for filename in os.listdir(submissions_dir_path):
-        if filename.startswith('canada_submissions'):
+        if re.match(r'canada_submissions_\d{4}-\d{2}.parquet.gzip', filename):
             file_path = os.path.join(submissions_dir_path, filename)
             df = pd.read_parquet(file_path)
             df = df[df['subreddit'].isin(subreddits)]

@@ -73,7 +73,8 @@ class TopicModel:
                 min_dist=0.0,
                 metric='cosine',
                 low_memory=low_memory,
-                random_state=42
+                random_state=42,
+                verbose=True
             )
             hdbscan_model = None
 

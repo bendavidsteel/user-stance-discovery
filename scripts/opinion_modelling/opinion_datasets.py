@@ -5,7 +5,10 @@ import pandas as pd
 import torch
 import tqdm
 
-class SocialDataset(torch.utils.data.Dataset):
+import generative
+import opinions
+
+class SocialInteractionDataset(torch.utils.data.Dataset):
     def __init__(self, user_df, posts_df, comments_df, post_opinions, comment_opinions, batch=True):
         self.batch = batch
 
@@ -90,7 +93,7 @@ class SocialDataset(torch.utils.data.Dataset):
         }
 
 
-class GenerativeDataset(SocialDataset):
+class GenerativeInteractionDataset(SocialInteractionDataset):
     def __init__(self, model_creator, num_people=1000, max_time_step=1000):
         generative_model = model_creator(num_users=num_people)
 
@@ -119,7 +122,7 @@ class GenerativeDataset(SocialDataset):
         super().__init__(user_df, posts_df, comments_df, post_opinions, comment_opinions)
 
 
-class TikTokInteractionDataset(SocialDataset):
+class TikTokInteractionDataset(SocialInteractionDataset):
     def __init__(self, data_path, batch=True):
         self.batch = batch
 
@@ -151,6 +154,51 @@ class TikTokInteractionDataset(SocialDataset):
         self.__init__(users_df, videos_df, comments_df, video_topic_probs, comments_topic_probs)
 
 
-class RedditInteractionDataset(SocialDataset):
-    def __init__():
+class RedditInteractionDataset(SocialInteractionDataset):
+    def __init__(self):
         pass
+
+
+class OpinionTimelineDataset:
+    def __init__(self, comment_df, comment_opinions):
+        self.comment_df = comment_df
+        self.comment_df[[f'stance_{i}' for i in range(comment_opinions.shape[1])]] = comment_opinions
+        self.num_opinions = comment_opinions.shape[1]
+
+    def __getitem__(self, time_idx):
+        comment_df = self.comment_df[self.comment_df['createtime'] <= time_idx]
+        user_comments_df = comment_df.groupby('author_id')
+        opinion_sequences = []
+        for user_id, user_comments in user_comments_df:
+            user_comments = user_comments.sort_values('createtime')
+            user_opinions = user_comments[[f'stance_{i}' for i in range(self.num_opinions)]].values
+            opinion_sequences.append(user_opinions)
+        opinion_snapshots = opinions.sliding_window(opinion_sequences, )
+        return opinion_snapshots
+
+class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
+    def __init__(self, num_people, max_time_step):
+        generative_model = generative.SocialGenerativeModel(num_users=num_people)
+
+        time_step = 0
+        generative_model.reset()
+
+        for time_step in tqdm.tqdm(range(max_time_step)):
+            generative_model.update(time_step)
+
+        comments_df = generative_model.platform.comments
+        posts_df = generative_model.platform.posts
+        user_df = generative_model.users
+
+        comments_df = comments_df.reset_index()
+        posts_df = posts_df.reset_index()
+        user_df = user_df.reset_index()
+        user_df = user_df[['index']]
+
+        comments_df.columns = ['comment_id', 'opinions', 'post_id', 'reply_comment_id', 'createtime']
+        posts_df.columns = ['post_id', 'opinions', 'createtime']
+        user_df.columns = ['author_id']
+
+        comment_opinions = generative_model.platform.get_comments_positions()
+
+        super().__init__(comments_df, comment_opinions)

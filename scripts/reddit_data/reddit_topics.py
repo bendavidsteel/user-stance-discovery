@@ -30,7 +30,7 @@ def main():
         min_topic_frac=0.001,
         n_neighbours=30 # higher for less topics
     )
-    topic_model.fit(docs)
+    topic_model.fit_transform(docs)
     if sample_frac:
         topic_model.transform(docs)
 

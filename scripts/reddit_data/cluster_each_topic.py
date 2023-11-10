@@ -36,10 +36,11 @@ def main():
     with open(os.path.join(data_dir_path, 'embeddings_minilm.npy'), 'rb') as f:
         embeddings = np.load(f)
 
-    topics_to_skip = [-1, 0]
+    topics_to_skip = [-1]
 
-    topic_info_df = topic_info_df[~topic_info_df['Topic'].isin(topics_to_skip)]
-    topic_info_df = topic_info_df.sort_values('Count')
+    # topic_info_df = topic_info_df[~topic_info_df['Topic'].isin(topics_to_skip)]
+    topic_info_df = topic_info_df[topic_info_df['Topic'].isin([0])]
+    # topic_info_df = topic_info_df.sort_values('Count')
 
     for _, topic in topic_info_df.iterrows():
         topic_id = topic['Topic']
