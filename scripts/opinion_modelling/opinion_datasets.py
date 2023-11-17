@@ -160,21 +160,31 @@ class RedditInteractionDataset(SocialInteractionDataset):
 
 
 class OpinionTimelineDataset:
-    def __init__(self, comment_df, comment_opinions):
+    def __init__(self, comment_df, stance_columns):
         self.comment_df = comment_df
-        self.comment_df[[f'stance_{i}' for i in range(comment_opinions.shape[1])]] = comment_opinions
-        self.num_opinions = comment_opinions.shape[1]
+        self.num_opinions = len(stance_columns)
+        self.stance_columns = stance_columns
 
     def __getitem__(self, time_idx):
         comment_df = self.comment_df[self.comment_df['createtime'] <= time_idx]
-        user_comments_df = comment_df.groupby('author_id')
-        opinion_sequences = []
-        for user_id, user_comments in user_comments_df:
+
+        if len(comment_df) == 0:
+            return np.zeros((0, self.num_opinions)), np.zeros((0, self.num_opinions))
+
+        user_comments_df = comment_df.groupby('user_id')
+        max_content = user_comments_df.count()['comment_id'].max()
+        users = user_comments_df.count().index.values
+
+        opinion_sequences = np.zeros((len(users), max_content, self.num_opinions))
+        sequence_mask = np.zeros((len(users), max_content))
+
+        for i, (user_id, user_comments) in enumerate(user_comments_df):
             user_comments = user_comments.sort_values('createtime')
-            user_opinions = user_comments[[f'stance_{i}' for i in range(self.num_opinions)]].values
-            opinion_sequences.append(user_opinions)
-        opinion_snapshots = opinions.sliding_window(opinion_sequences, )
-        return opinion_snapshots
+            user_opinions = user_comments[self.stance_columns].values
+            opinion_sequences[i, :len(user_opinions), :] = user_opinions
+            sequence_mask[i, :len(user_opinions)] = 1
+        opinion_snapshots = opinions.sliding_window(opinion_sequences, sequence_mask, halflife=1.)
+        return opinion_snapshots, users
 
 class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
     def __init__(self, num_people, max_time_step):
@@ -190,15 +200,21 @@ class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
         posts_df = generative_model.platform.posts
         user_df = generative_model.users
 
+        if len(comments_df) == 0:
+            raise ValueError("No comments generated")
+
         comments_df = comments_df.reset_index()
         posts_df = posts_df.reset_index()
         user_df = user_df.reset_index()
         user_df = user_df[['index']]
 
-        comments_df.columns = ['comment_id', 'opinions', 'post_id', 'reply_comment_id', 'createtime']
-        posts_df.columns = ['post_id', 'opinions', 'createtime']
-        user_df.columns = ['author_id']
+        comments_df.columns = ['comment_id', 'opinions', 'post', 'comment', 'createtime', 'user_id', 'post_id', 'parent_comment_id']
+        posts_df.columns = ['post_id', 'opinions', 'createtime', 'user_id']
+        user_df.columns = ['user_id']
 
-        comment_opinions = generative_model.platform.get_comments_positions()
+        num_opinions = generative_model.num_opinions
 
-        super().__init__(comments_df, comment_opinions)
+        stance_columns = [f'stance_{i}' for i in range(num_opinions)]
+        comments_df[stance_columns] = np.array([np.array(o) for o in comments_df['opinions']])
+
+        super().__init__(comments_df, stance_columns)

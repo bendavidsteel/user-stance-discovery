@@ -7,8 +7,9 @@ class Mistral:
     def __init__(self):
         self.device = "cuda" # the device to load the model onto
         tokenizer_kwargs = {'use_fast': True, 'padding_side': 'left', 'add_eos_token': True}
+        self.model_name = 'mistralai/Mistral-7B-Instruct-v0.1'
         self.guided_model = outline_models.transformers(
-            'mistralai/Mistral-7B-Instruct-v0.1', 
+            self.model_name, 
             device='cuda', 
             model_kwargs={'torch_dtype': torch.float16, 'device_map': 'auto'}, 
             tokenizer_kwargs=tokenizer_kwargs
@@ -54,8 +55,8 @@ class Zephyr:
     def __init__(self):
         # self.tokenizer = transformers.AutoTokenizer.from_pretrained("HuggingFaceH4/zephyr-7b-alpha")
         # self.model = transformers.AutoModelForCausalLM.from_pretrained("HuggingFaceH4/zephyr-7b-alpha", torch_dtype=torch.bfloat16, device_map="auto")#, use_flash_attention_2=True)
-
-        self.guided_model = outline_models.transformers('HuggingFaceH4/zephyr-7b-alpha', device='cuda', model_kwargs={'torch_dtype': torch.bfloat16, 'device_map': 'auto'})
+        self.model_name = 'HuggingFaceH4/zephyr-7b-beta'
+        self.guided_model = outline_models.transformers(self.model_name, device='cuda', model_kwargs={'torch_dtype': torch.bfloat16, 'device_map': 'auto'})
 
     def _format(self, prompt):
         # We use the tokenizer's chat template to format each message - see https://huggingface.co/docs/transformers/main/en/chat_templating

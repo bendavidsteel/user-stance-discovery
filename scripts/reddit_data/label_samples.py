@@ -42,8 +42,8 @@ def main():
         topic_submissions = topic_submissions.with_columns(pl.col('all_text').str.len_chars().alias('all_text_len'))
         topic_submissions = topic_submissions.sort('all_text_len')
 
-        gold_comment_path = os.path.join(run_dir_path, f'topic_{topics[0]}', 'sample_context_comments_gold_stance.parquet.zstd')
-        gold_submission_path = os.path.join(run_dir_path, f'topic_{topics[0]}', 'sample_context_submissions_gold_stance.parquet.zstd')
+        gold_comment_path = os.path.join(run_dir_path, f'topic_{topics[0]}', 'annotator_1', 'sample_context_comments_gold_stance.parquet.zstd')
+        gold_submission_path = os.path.join(run_dir_path, f'topic_{topics[0]}', 'annotator_1', 'sample_context_submissions_gold_stance.parquet.zstd')
 
         if os.path.exists(gold_comment_path) and os.path.exists(gold_submission_path):
             topic_comments = pl.read_parquet(gold_comment_path)

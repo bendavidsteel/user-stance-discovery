@@ -32,19 +32,19 @@ class SocialPlatform:
         self.posts = pd.concat([self.posts, pd.DataFrame([new_post], index=[id])])
         self.interactions.add_node(id)
 
-    def create_comment(self, user_id, time_step, post_id, pos, reply_comment_id=None):
+    def create_comment(self, user_id, time_step, post_id, pos, parent_comment_id=None):
         id = self.get_id()
         new_comment = {
             'user_id': user_id,
             'position': pos,
             'post_id': post_id,
-            'reply_comment_id': reply_comment_id,
+            'parent_comment_id': parent_comment_id,
             'time': time_step
         }
         self.comments = pd.concat([self.comments, pd.DataFrame([new_comment], index=[id])])
         self.interactions.add_edge(id, post_id)
-        if reply_comment_id is not None:
-            self.interactions.add_edge(id, reply_comment_id)
+        if parent_comment_id is not None:
+            self.interactions.add_edge(id, parent_comment_id)
 
     def get_post_comments(self, post_ids, limit):
         all_comments = []
@@ -181,6 +181,9 @@ class SocialGenerativeModel:
 
         self.content_scale = content_scale
 
+        self.num_opinions = 2
+        self.opinion_positions = [-1, 0, 1]
+
         self.platform = SocialPlatform()
 
     def reset(self):
@@ -219,6 +222,21 @@ class SocialGenerativeModel:
 
         self.users = pd.DataFrame(user_dicts)
 
+    def _discrete_positions(self, positions):
+        # map positions to discrete opinion positions
+        discrete_positions = torch.zeros(positions.shape)
+        for j in range(positions.shape[0]):
+            for i in range(self.num_opinions):
+                closest_op = 0
+                closest_op_dist = 999999
+                for op_pos in self.opinion_positions:
+                    op_dist = abs(positions[j, i] - op_pos)
+                    if op_dist < closest_op_dist:
+                        closest_op = op_pos
+                        closest_op_dist = op_dist
+                discrete_positions[j, i] = closest_op
+        return discrete_positions
+
     def seed_posts(self):
         self._create_posts(0, 1 / self.num_users)
 
@@ -248,22 +266,23 @@ class SocialGenerativeModel:
         users_to_post_positions = torch.stack([pos for pos in users_to_post['position']])
         content_distributions = torch.distributions.MultivariateNormal(users_to_post_positions, self.content_scale * torch.eye(users_to_post_positions.shape[1]))
         post_contents = content_distributions.sample()
+        post_contents = self._discrete_positions(post_contents)
         [
             self.platform.create_post(user_id, time_step, post_content)
             for user_id, post_content 
             in zip(users_to_post_ids, post_contents)
         ]
 
-    def create_comments(self, time_step, chosen_post_ids, chosen_content_ids):
-        self._create_comments(time_step, chosen_post_ids, chosen_content_ids, 1 / (self.num_users * 2))
+    def create_comments(self, time_step):
+        return self._create_comments(time_step, 1 / (self.num_users * 2))
 
-    def _create_comments(self, time_step, chosen_post_ids, chosen_content_ids, prob_threshold):
-        to_comment = torch.distributions.Uniform(0., 1.).sample((self.num_users,)) < prob_threshold
-        if not to_comment.any():
-            return
-        
+    def _create_comments(self, time_step, prob_threshold):
         users_pos = self.get_users_positions()
 
+        to_comment = torch.distributions.Uniform(0., 1.).sample((self.num_users,)) < prob_threshold
+        if not to_comment.any():
+            return users_pos
+        
         # TODO fix for only some users commenting
         # TODO currently users choose from all posts, they should be restricted, either randomly, or by a recommendation algorithm, or by social influence
         # let users choose the post they want to interact with
@@ -282,9 +301,10 @@ class SocialGenerativeModel:
 
         comment_distributions = torch.distributions.MultivariateNormal(users_to_comment_positions, self.content_scale * torch.eye(users_to_comment_positions.shape[1]))
         comment_positions = comment_distributions.sample()
+        comment_positions = self._discrete_positions(comment_positions)
 
         [
-            self.platform.create_comment(user_id, time_step, chosen_post_idx, comment_pos, comment_id=chosen_comment_idx)
+            self.platform.create_comment(user_id, time_step, chosen_post_idx, comment_pos, parent_comment_id=chosen_comment_idx)
             for user_id, chosen_post_idx, chosen_comment_idx, comment_pos 
             in zip(users_to_comment_ids, chosen_post_ids, chosen_content_ids, comment_positions)
         ]

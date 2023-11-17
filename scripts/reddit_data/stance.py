@@ -25,11 +25,12 @@ def get_prompt_template(is_comment, is_replying):
 
 class StanceClassifier:
     def __init__(self, model_name='mistral', response_type='choice', prompt_type='base'):
-        self.model_name = model_name
         if model_name == 'mistral':
             self.model = lm.Mistral()
         elif model_name == 'zephyr':
             self.model = lm.Zephyr()
+
+        self.model_name = self.model.model_name
 
         self.prompt_type = prompt_type
 
