@@ -47,9 +47,10 @@ def evaluate_annotations(df, stance, stance_slug, run_dir_path, agreement_method
         disagreement = np.max(cat_counts, axis=1) != len(annotated_columns)
         disagreement_df = df.filter(pl.Series(disagreement)).select(pl.col(['id', 'prompt'] + annotated_columns))
         disagreement_path = os.path.join(run_dir_path, f'topic_{topics[0]}', f'{stance_slug}_{type_name.lower()}_disagreements.csv')
+        valid = False
         if os.path.exists(disagreement_path):
             current_disagreement_df = pl.read_csv(disagreement_path)
-            valid = set(current_disagreement_df['id'].to_list()) == set(disagreement_df['id'].to_list())
+            valid = 'id' in current_disagreement_df.columns and set(current_disagreement_df['id'].to_list()) == set(disagreement_df['id'].to_list())
         
         if not valid:
             disagreement_df.write_csv(os.path.join(run_dir_path, f'topic_{topics[0]}', f'{stance_slug}_{type_name.lower()}_disagreements.csv'))

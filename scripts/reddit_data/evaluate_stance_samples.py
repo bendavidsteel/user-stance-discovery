@@ -90,6 +90,7 @@ def main():
             "reply_comment_prompt": classifier._get_prompt_template(True, True),
             "base_comment_prompt": classifier._get_prompt_template(True, False),
             "submission_prompt": classifier._get_prompt_template(False, False),
+            "system_prompt": classifier.model.system_prompt,
         }
     )
 
