@@ -1,9 +1,10 @@
 import json
 import os
 
-import wandb
+import dspy
 import polars as pl
 import tqdm
+import wandb
 
 from stance import StanceClassifier
 
@@ -78,6 +79,8 @@ def main():
     response_type = 'thought'
     classifier = StanceClassifier(model_name=model_name, response_type=response_type)
 
+    dspy.settings.configure(lm=classifier.model)
+
     # start a new wandb run to track this script
     wandb.init(
         # set the wandb project where this run will be logged
@@ -140,6 +143,8 @@ def main():
                 wandb.run.config['agreement_method'] = agreement_method
 
                 comment_rows = topic_comments.select(pl.concat_list(pl.col(['body', 'body_parent', 'post_all_text']))).to_series(0).to_list()
+                comment_dataset = stance.StanceDataset(comment_rows, stance)
+                comment_trainset = [x.with_inputs('post', 'parent_comment', 'comment') for x in comment_dataset.train]
                 comment_stances = []
                 for i in tqdm.tqdm(range(0, len(comment_rows), batch_size)):
                     batch_rows = comment_rows[i:min(len(comment_rows), i+batch_size)]

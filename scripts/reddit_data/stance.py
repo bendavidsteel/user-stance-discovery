@@ -1,3 +1,5 @@
+import dspy
+
 import lm
 
 PROMPT_RESPONSES = [
@@ -23,12 +25,29 @@ def get_prompt_template(is_comment, is_replying):
     prompt += """ Respond only with one of the following: against, neutral, favor: """
     return prompt
 
+class StanceDataset(dspy.Dataset):
+    def __init__(self, examples, target):
+        self._dev = [dict(comment=ex['comment'], parent_comment=ex['parent_comment'], post=ex['post'], target=target) for ex in examples]
+
+class StanceDetectionSignature(dspy.Signature):
+    """Determine the stance of the comment towards the target."""
+
+    post = dspy.InputField(desc="The post being commented on.")
+    parent_comment = dspy.InputField(desc="The comment being replied to.")
+    comment = dspy.InputField(desc="The comment to determine the stance of.")
+    target = dspy.InputField(desc="The target of the stance detection.")
+    stance = dspy.OutputField(desc="Choice between favor, neutral, and against.")
+
 class StanceClassifier:
     def __init__(self, model_name='mistral', response_type='choice', prompt_type='base'):
         if model_name == 'mistral':
-            self.model = lm.Mistral()
+            # self.model = lm.Mistral()
+            self.model = dspy.HFModel('mistralai/Mistral-7B-Instruct-v0.1')
         elif model_name == 'zephyr':
-            self.model = lm.Zephyr()
+            # self.model = lm.Zephyr()
+            self.model = dspy.HFModel('HuggingFaceH4/zephyr-7b-beta')
+
+        self.classifier = dspy.Predict(StanceDetectionSignature)
 
         self.model_name = self.model.model_name
 
