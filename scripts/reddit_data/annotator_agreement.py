@@ -9,11 +9,11 @@ def convert_to_cat_counts(examples):
     cat_counts = np.zeros((len(examples), 3))
     for i, annotations in enumerate(examples):
         for annotation in annotations:
-            if annotation in ['favor', '2', '1']:
+            if annotation == 'favor':
                 cat_counts[i, 0] += 1
-            elif annotation in ['neutral', '0']:
+            elif annotation == 'neutral':
                 cat_counts[i, 1] += 1
-            elif annotation in ['against', '-2', '-1']:
+            elif annotation == 'against':
                 cat_counts[i, 2] += 1
             else:
                 raise Exception("Invalid annotation")
@@ -21,6 +21,11 @@ def convert_to_cat_counts(examples):
 
 
 def join_dfs(main_df, df, col_name):
+
+    # consolidate annotation schemes
+    if df[col_name][0] not in ['favor', 'against', 'neutral']:
+        df = df.with_columns(pl.col(col_name).map_dict({'-2': 'against', '-1': 'against', '0': 'neutral', '1': 'favor', '2': 'favor'}))
+
     if 'id' in df:
         # create row count to keep order
         main_df = main_df.with_columns(pl.Series(name='row_count', values=range(len(main_df))))
@@ -60,8 +65,14 @@ def evaluate_annotations(df, stance, stance_slug, run_dir_path, agreement_method
             gold_vals = df[annotator_1_col]
 
         elif agreement_method == 'adjudication':
+            if not any('adjudicator' in col for col in current_disagreement_df.columns):
+                return
             adjudicated_col = [col for col in current_disagreement_df.columns if 'adjudicator' in col][0]
-            gold_vals = current_disagreement_df[adjudicated_col]
+            annotator_1_col = [col for col in annotated_columns if 'annotator_1' in col][0]
+            df = df.join(current_disagreement_df[['id', adjudicated_col]], on='id', how='left')
+            df = df.with_columns(pl.col(adjudicated_col).fill_null(pl.col(annotator_1_col)))
+            gold_vals = df[adjudicated_col]
+            df = df.drop(adjudicated_col)
 
         df = df.with_columns(pl.Series(name=f"gold_{stance_slug}_{agreement_method}", values=gold_vals))
         
@@ -77,7 +88,7 @@ def main():
     with open(os.path.join(run_dir_path, 'topic_stances.json'), 'r') as f:
         all_topic_stances = json.load(f)
 
-    agreement_method = 'annotator_1'
+    agreement_method = 'adjudication'
 
     for topics_stances in all_topic_stances['topic_stances']:
 
