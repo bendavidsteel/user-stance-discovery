@@ -1,13 +1,15 @@
 import os
+import random
 import re
 
 import dspy
 from dspy import dsp
 from dspy.datasets.dataset import Dataset as DSPyDataset
-from dspy.teleprompt import BootstrapFewShot, BootstrapFewShotWithOptuna, LabeledFewShot, BootstrapFinetune
+from dspy.teleprompt import BootstrapFewShot, BootstrapFewShotWithOptuna, BootstrapFewShotWithRandomSearch, LabeledFewShot, BootstrapFinetune
 import torch
 
 import lm
+from prompt_tuning import Prompttune
 
 PROMPT_RESPONSES = [
     {
@@ -32,6 +34,20 @@ TARGET_EXPLANATIONS = {
     'canadian aid to ukraine': "Opinion on any government aid to Ukraine from Canada, including financial, arms, or in the form of troops. Individual private citizen volunteers don't count.",
     'funding the cbc': "Opinion on any government funding to the CBC, including any funding cuts or increases.",
     'french language laws': "Favor/against laws requiring that people speak French/must attend French schooling/other laws that promote the use of French or limit the use of English in order to increase the use of French"
+}
+
+TARGET_NAMES = {
+    'vaccine mandates': "vaccine mandates",
+    'renter protections': "renter protections",
+    'liberals': "the Liberal Party of Canada",
+    'conservatives': "the Conservative Party of Canada",
+    'ndp': "the NDP Party of Canada",
+    'gun control': "gun control",
+    'drug decriminalization': "drug decriminalization",
+    'liberal immigration policy': "open immigration policy",
+    'canadian aid to ukraine': "Canadian aid to Ukraine",
+    'funding the cbc': "funding the CBC",
+    'french language laws': "French language laws"
 }
 
 def map_row(r):
@@ -132,6 +148,24 @@ class CommentStanceDetectionSignature(dspy.Signature):
     def extract(example, raw_pred):
         field_names = ['target_opinion', 'target_explanation', 'post', 'parent_comment', 'comment', 'opinion']
         return _extract_example(field_names, example, raw_pred)
+    
+class CommentStanceDetectionTemplateSignature(dspy.Signature):
+    """Predict the stance of the comment towards {target_opinion}. Here is an explanation of what we mean by {target_opinion}: {target_explanation}
+    If the comment is directly or indirectly in favor of {target_opinion}, or opposing or critizing something opposed to {target_opinion}, then the stance should be favor.
+    If the comment is directly or indirectly against {target_opinion}, or opposing or critizing something in favor of {target_opinion}, then the stance should be against.
+    If the comment is discussing something irrelevant to {target_opinion}, or if it is unclear what the stance is, then the stance should be neutral."""
+
+    post = dspy.InputField(desc="""The post being commented on, may be useful in determining what the comment is discussing.""")
+    parent_comment = dspy.InputField(desc="""The parent comment being replied to, may be useful in determining the context of the comment.""")
+    comment = dspy.InputField(desc="""The comment to determine the opinion of.""")
+    opinion = dspy.OutputField(desc="""${favor, neutral, or against}""", prefix="Stance: The stance of the comment is ")
+
+    def __call__(self, *args, **kwargs):
+        return ""
+
+    def extract(example, raw_pred):
+        field_names = ['target_opinion', 'target_explanation', 'post', 'parent_comment', 'comment', 'opinion']
+        return _extract_example(field_names, example, raw_pred)
 
 class TwoStepCommentStanceDetectionSignature(dspy.Signature):
     """Determine the opinion of the comment towards the target issue.
@@ -201,27 +235,43 @@ class ChainOfThoughtForOneStepOpinion(dspy.Predict):
 
 
 class DSPyStanceDataset(DSPyDataset):
-    def __init__(self, examples, target, target_explanation, train_num, val_num):
+    def __init__(self, examples, target, target_explanation, train_num, val_num, strategy='order'):
         ds = []
         for ex in examples:
             d = ex.copy()
             d['target_opinion'] = target
             d['target_explanation'] = target_explanation
             ds.append(d)
-        self._train = ds[:train_num]
-        self._dev = ds[train_num:train_num + val_num]
-        self._test = ds[train_num + val_num:]
+
+        if strategy == 'order':
+            self._train = ds[:train_num]
+            self._dev = ds[train_num:train_num + val_num]
+            self._test = ds[train_num + val_num:]
+        elif 'ratio' in strategy:
+            ratio = strategy.split(':')[1]
+            num_favor, num_against, num_neutral = [int(x) for x in ratio]
+            num_total = num_favor + num_against + num_neutral
+            share_favor, share_against, share_neutral = num_favor / num_total, num_against / num_total, num_neutral / num_total
+            favor = [d for d in ds if d['gold_stance'] == 'favor']
+            against = [d for d in ds if d['gold_stance'] == 'against']
+            neutral = [d for d in ds if d['gold_stance'] == 'neutral']
+            self._train = favor[:int(share_favor * train_num)] + against[:int(share_against * train_num)] + neutral[:int(share_neutral * train_num)]
+            self._dev = favor[int(share_favor * train_num):int(share_favor * train_num) + int(share_favor * val_num)] + against[int(share_against * train_num):int(share_against * train_num) + int(share_against * val_num)] + neutral[int(share_neutral * train_num):int(share_neutral * train_num) + int(share_neutral * val_num)]
+            self._test = favor[int(share_favor * train_num) + int(share_favor * val_num):] + against[int(share_against * train_num) + int(share_against * val_num):] + neutral[int(share_neutral * train_num) + int(share_neutral * val_num):]
+            random.Random(0).shuffle(self._train)
+            random.Random(0).shuffle(self._dev)
+            random.Random(0).shuffle(self._test)
         super().__init__(self, train_size=len(self._train), dev_size=len(self._dev), test_size=len(self._test))
         self.do_shuffle = False
 
 class StanceDataset:
-    def __init__(self, examples, target, train_num=None, val_num=None, backend='dspy'):
+    def __init__(self, examples, target, train_num=None, val_num=None, backend='dspy', strategy='order'):
         self.backend = backend
         self.train_num = train_num
         self.val_num = val_num
         examples = [map_row(r) for r in examples]
         if self.backend == 'dspy':
-            self.dataset = DSPyStanceDataset(examples, target, TARGET_EXPLANATIONS[target], train_num, val_num)
+            self.dataset = DSPyStanceDataset(examples, TARGET_NAMES[target], TARGET_EXPLANATIONS[target], train_num, val_num, strategy=strategy)
         elif self.backend == 'hf':
             self.dataset = examples
 
@@ -263,13 +313,15 @@ class StanceClassifier:
 
         elif self.backend == 'dspy':
             self.model_name = model_name
-            if "gpt" in model_name:
-                self.model = dspy.OpenAI(self.model_name, os.environ['OPENAI_API_KEY'])
-            else:
-                self.model = dspy.HFModel(self.model_name, model_kwargs={'torch_dtype': torch.bfloat16, 'use_flash_attention_2': True, 'device_map': 'auto'})
-            dspy.settings.configure(lm=self.model)
+            if teleprompter != "prompttune":
+                if "gpt" in model_name:
+                    self.model = dspy.OpenAI(self.model_name, os.environ['OPENAI_API_KEY'])
+                else:
+                    self.model = dspy.HFModel(self.model_name, model_kwargs={'torch_dtype': torch.bfloat16, 'use_flash_attention_2': True, 'device_map': 'auto'})
+                dspy.settings.configure(lm=self.model)
         
         self.teleprompter = teleprompter
+        self.teleprompter_settings = {}
         self.prompting_method = prompting_method
         self.opinion_method = opinion_method
         self.classifier = None
@@ -288,6 +340,10 @@ class StanceClassifier:
                 TwoStepCommentStanceDetectionSignature({'demos': []})
             elif self.opinion_method == 'yesno':
                 return YesNoCommentStanceDetectionSignature({'demos': []})
+            elif self.opinion_method == 'template':
+                return CommentStanceDetectionTemplateSignature({'demos': []})
+            else:
+                raise ValueError(f"Invalid opinion method: {self.opinion_method}")
 
     def _format_text_to_prompt(self, text, target):
         is_comment, is_replying = False, False
@@ -462,7 +518,21 @@ class StanceClassifier:
                     teleprompter = BootstrapFewShot(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
                     args = (StanceModule(),)
                     kwargs = {'trainset': trainset}
+                else:
+                    raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
+                
+                self.classifier = teleprompter.compile(*args, **kwargs)
+            else:
+                if self.teleprompter == 'optuna':
+                    teleprompter = BootstrapFewShotWithOptuna(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
+                    args = (StanceModule(),)
+                    kwargs = {'max_demos': len(trainset), 'trainset': trainset, 'valset': valset}
+                elif self.teleprompter == 'random':
+                    teleprompter = BootstrapFewShotWithRandomSearch(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset), num_threads=1)
+                    args = (StanceModule(),)
+                    kwargs = {'trainset': trainset, 'valset': valset}
                 elif self.teleprompter == 'finetune':
+                    self.teleprompter_settings = {'lr': 1e-5, 'epochs': 5}
                     teleprompter = BootstrapFinetune(metric=validate_context_and_answer)
                     labelled_teleprompter = LabeledFewShot(k=len(trainset))
                     teleprompter.teleprompter = BootstrapFewShot(metric=validate_context_and_answer,
@@ -470,11 +540,18 @@ class StanceClassifier:
                                              max_labeled_demos=len(trainset))
                     teacher = labelled_teleprompter.compile(StanceModule(), trainset=trainset)
                     args = (StanceModule(),)
-                    kwargs = {'teacher': teacher, 'trainset': trainset, 'target': self.model_name, 'bsize': 2, 'bf16': True, 'peft': True}
+                    kwargs = {'teacher': teacher, 'trainset': trainset, 'valset': valset, 'target': self.model_name, 'bsize': 1, 'bf16': True, 'peft': True}
+                    kwargs.update(self.teleprompter_settings)
+                elif self.teleprompter == "prompttune":
+                    teleprompter = Prompttune()
+                    args = (StanceModule(),)
+                    self.teleprompter_settings = {'lr': 1e-5, 'num_epochs': 10, 'batch_size': 8}
+                    kwargs = {'model_name': self.model_name, 'trainset': trainset, 'valset': valset}
+                    kwargs.update(self.teleprompter_settings)
+                else:
+                    raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
+                
                 self.classifier = teleprompter.compile(*args, **kwargs)
-            else:
-                teleprompter = BootstrapFewShotWithOptuna(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
-                self.classifier = teleprompter.compile(StanceModule(), max_demos=len(trainset), trainset=trainset, valset=valset)
 
     def _get_classifier(self, comment=True):
         if self.opinion_method == 'onestep':
@@ -483,12 +560,13 @@ class StanceClassifier:
             else:
                 signature = PostStanceDetectionSignature
         elif self.opinion_method == 'twostep':
-            if comment:
-                signature = TwoStepCommentStanceDetectionSignature
-            else:
-                signature = PostStanceDetectionSignature
+            signature = TwoStepCommentStanceDetectionSignature
         elif self.opinion_method == 'yesno':
             signature = YesNoCommentStanceDetectionSignature
+        elif self.opinion_method == 'template':
+            signature = CommentStanceDetectionTemplateSignature
+        else:
+            raise ValueError(f"Invalid opinion method: {self.opinion_method}")
 
         if self.prompting_method == 'predict':
             classifier = dspy.Predict(signature)
@@ -527,6 +605,10 @@ class StanceClassifier:
     def get_extended_prompt(self):
         self._get_classifier()
         return self.prompting_text
+    
+    def remove_model(self):
+        self.classifier.predictors()[0].lm.model.to('cpu')
+        del self.classifier.predictors()[0]
     
 def _parse_yesno_answer(response):
     response = response.split('\n')[0].lower()
@@ -618,3 +700,4 @@ class MultiComparison(dspy.Module):
         stance_counts = sorted(stance_counts.items(), key=lambda x: x[1], reverse=True)
         stance = stance_counts[0][0]
         return [c for c in completions if _parse_opinion_answer(c.opinion) == stance][0]
+    

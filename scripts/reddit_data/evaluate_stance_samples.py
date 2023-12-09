@@ -6,11 +6,11 @@ import polars as pl
 import tqdm
 import wandb
 
-from stance import StanceClassifier, StanceDataset, TARGET_EXPLANATIONS
+from stance import StanceClassifier, StanceDataset, TARGET_EXPLANATIONS, TARGET_NAMES
 
-def get_f1_score(tp, fp, tn):
+def get_f1_score(tp, fp, fn):
     precision = tp / (tp + fp) if tp + fp > 0 else 0
-    recall = tp / (tp + tn) if tp + tn > 0 else 0
+    recall = tp / (tp + fn) if tp + fn > 0 else 0
     f1 = 2 * (precision * recall) / (precision + recall) if precision + recall > 0 else 0
     return precision, recall, f1
 
@@ -18,10 +18,10 @@ def get_stance_f1_score(gold_stances, stances):
 
     num_f_tp = 0
     num_f_fp = 0
-    num_f_tn = 0
+    num_f_fn = 0
     num_a_tp = 0
     num_a_fp = 0
-    num_a_tn = 0
+    num_a_fn = 0
 
     for gold_stance, stance in zip(gold_stances, stances):
         assert stance in ['favor', 'against', 'neutral']
@@ -31,33 +31,33 @@ def get_stance_f1_score(gold_stances, stances):
         if stance == 'favor' and gold_stance != 'favor':
             num_f_fp += 1
         if stance != 'favor' and gold_stance == 'favor':
-            num_f_tn += 1
+            num_f_fn += 1
         if stance == 'against' and gold_stance == 'against':
             num_a_tp += 1
         if stance == 'against' and gold_stance != 'against':
             num_a_fp += 1
         if stance != 'against' and gold_stance == 'against':
-            num_a_tn += 1
+            num_a_fn += 1
 
     # calculate total F1 score as average of F1 scores for each stance
     # calculate f1 score for favor
     # calculate precision for favor
 
-    if (num_f_tp + num_f_tn) > 0:
-        favor_precision, favor_recall, favor_f1 = get_f1_score(num_f_tp, num_f_fp, num_f_tn)
+    if (num_f_tp + num_f_fn) > 0:
+        favor_precision, favor_recall, favor_f1 = get_f1_score(num_f_tp, num_f_fp, num_f_fn)
 
-    if (num_a_tp + num_a_tn) > 0:
-        against_precision, against_recall, against_f1 = get_f1_score(num_a_tp, num_a_fp, num_a_tn)
+    if (num_a_tp + num_a_fn) > 0:
+        against_precision, against_recall, against_f1 = get_f1_score(num_a_tp, num_a_fp, num_a_fn)
 
-    if (num_f_tp + num_f_tn) > 0 and (num_a_tp + num_a_tn) > 0:
+    if (num_f_tp + num_f_fn) > 0 and (num_a_tp + num_a_fn) > 0:
         f1 = (favor_f1 + against_f1) / 2
         precision = (favor_precision + against_precision) / 2
         recall = (favor_recall + against_recall) / 2
-    elif (num_f_tp + num_a_tn) > 0:
+    elif (num_f_tp + num_a_fn) > 0:
         f1 = favor_f1
         precision = favor_precision
         recall = favor_recall
-    elif (num_a_tp + num_a_tn) > 0:
+    elif (num_a_tp + num_a_fn) > 0:
         f1 = against_f1
         precision = against_precision
         recall = against_recall
@@ -66,7 +66,7 @@ def get_stance_f1_score(gold_stances, stances):
 
     return precision, recall, f1
 
-def do_stance_detection(stance, stance_slug, df, cols, classifier, batch_size, text_type, f1s, precisions, recalls, log_to_wandb, topic_path, train_num, val_num):
+def do_stance_detection(stance, stance_slug, df, cols, classifier, batch_size, text_type, f1s, precisions, recalls, log_to_wandb, topic_path, train_num, val_num, dataset_strategy):
     if not any(f'gold_{stance_slug}' in c for c in df.columns):
         return
     gold_col = [c for c in df.columns if f'gold_{stance_slug}' in c][0]
@@ -74,15 +74,19 @@ def do_stance_detection(stance, stance_slug, df, cols, classifier, batch_size, t
     if log_to_wandb:
         wandb.run.config['agreement_method'] = agreement_method
         wandb.run.config[f'{stance_slug}_target_explanation'] = TARGET_EXPLANATIONS[stance]
+        wandb.run.config[f'{stance_slug}_target_name'] = TARGET_NAMES[stance]
 
     inputs = df.select(pl.concat_list(pl.col(cols + [gold_col]))).to_series(0).to_list()
 
-    dataset = StanceDataset(inputs, stance, train_num=train_num, val_num=val_num)
+    dataset = StanceDataset(inputs, stance, train_num=train_num, val_num=val_num, strategy=dataset_strategy)
 
     if train_num + val_num > 0:
         train_dataset = dataset.get_train_data()
         val_dataset = dataset.get_dev_data()
         classifier.train(train_dataset, val_dataset)
+
+        if log_to_wandb:
+            wandb.run.config['teleprompter_settings'] = classifier.teleprompter_settings
 
     data = dataset.get_test_data()
     stances = []
@@ -132,12 +136,13 @@ def main():
 
     use_baseline = False
     train_num = 10
-    val_num = 0
+    val_num = 10
+    dataset_strategy = 'ratio:113'
     if not use_baseline:
         model_name = 'HuggingFaceH4/zephyr-7b-beta'
-        prompting_method = 'chainofthought'
-        opinion_method = 'onestep'
-        teleprompter = 'finetune'
+        prompting_method = 'predict'
+        opinion_method = 'template'
+        teleprompter = 'prompttune'
         classifier = StanceClassifier(model_name=model_name, prompting_method=prompting_method, opinion_method=opinion_method, backend="dspy", teleprompter=teleprompter)
     else:
         baseline_type = 'annotator'
@@ -198,6 +203,7 @@ def main():
                 "submission_prompt": str(classifier._get_prompt_template(False, False)),
                 "train_num": train_num,
                 "val_num": val_num,
+                "dataset_strategy": dataset_strategy,
                 "prompt_template": str(messages),
                 "teleprompter": classifier.teleprompter,
                 "extended_prompt": classifier.get_extended_prompt(),
@@ -253,8 +259,11 @@ def main():
                 print("Predicting stance for comments")
                 do_stance_detection(
                     stance, stance_slug, topic_comments, ['body', 'body_parent', 'post_all_text'], classifier, batch_size, 'comment', 
-                    comment_f1s, comment_precisions, comment_recalls, log_to_wandb, topic_path, train_num, val_num
+                    comment_f1s, comment_precisions, comment_recalls, log_to_wandb, topic_path, train_num, val_num, dataset_strategy
                 )
+
+                if teleprompter == 'prompttune':
+                    classifier.remove_model()
 
             # if topic_submissions is not None:
             #     print("Predicting stance for submissions")
