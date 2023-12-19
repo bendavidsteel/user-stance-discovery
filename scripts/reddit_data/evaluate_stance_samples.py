@@ -1,72 +1,15 @@
 import json
 import os
 
-import dspy
 import polars as pl
 import tqdm
 import wandb
 
-from stance import StanceClassifier, StanceDataset, TARGET_EXPLANATIONS, TARGET_NAMES
+from stance import StanceClassifier, StanceDataset, StancesDataset, TARGET_EXPLANATIONS, TARGET_NAMES, get_stance_f1_score
+from utils import process_quotes
 
-def get_f1_score(tp, fp, fn):
-    precision = tp / (tp + fp) if tp + fp > 0 else 0
-    recall = tp / (tp + fn) if tp + fn > 0 else 0
-    f1 = 2 * (precision * recall) / (precision + recall) if precision + recall > 0 else 0
-    return precision, recall, f1
 
-def get_stance_f1_score(gold_stances, stances):
-
-    num_f_tp = 0
-    num_f_fp = 0
-    num_f_fn = 0
-    num_a_tp = 0
-    num_a_fp = 0
-    num_a_fn = 0
-
-    for gold_stance, stance in zip(gold_stances, stances):
-        assert stance in ['favor', 'against', 'neutral']
-        assert gold_stance in ['favor', 'against', 'neutral']
-        if stance == 'favor' and gold_stance == 'favor':
-            num_f_tp += 1
-        if stance == 'favor' and gold_stance != 'favor':
-            num_f_fp += 1
-        if stance != 'favor' and gold_stance == 'favor':
-            num_f_fn += 1
-        if stance == 'against' and gold_stance == 'against':
-            num_a_tp += 1
-        if stance == 'against' and gold_stance != 'against':
-            num_a_fp += 1
-        if stance != 'against' and gold_stance == 'against':
-            num_a_fn += 1
-
-    # calculate total F1 score as average of F1 scores for each stance
-    # calculate f1 score for favor
-    # calculate precision for favor
-
-    if (num_f_tp + num_f_fn) > 0:
-        favor_precision, favor_recall, favor_f1 = get_f1_score(num_f_tp, num_f_fp, num_f_fn)
-
-    if (num_a_tp + num_a_fn) > 0:
-        against_precision, against_recall, against_f1 = get_f1_score(num_a_tp, num_a_fp, num_a_fn)
-
-    if (num_f_tp + num_f_fn) > 0 and (num_a_tp + num_a_fn) > 0:
-        f1 = (favor_f1 + against_f1) / 2
-        precision = (favor_precision + against_precision) / 2
-        recall = (favor_recall + against_recall) / 2
-    elif (num_f_tp + num_a_fn) > 0:
-        f1 = favor_f1
-        precision = favor_precision
-        recall = favor_recall
-    elif (num_a_tp + num_a_fn) > 0:
-        f1 = against_f1
-        precision = against_precision
-        recall = against_recall
-    else:
-        raise Exception("No true positives or true negatives")
-
-    return precision, recall, f1
-
-def do_stance_detection(stance, stance_slug, df, cols, classifier, batch_size, text_type, f1s, precisions, recalls, log_to_wandb, topic_path, train_num, val_num, dataset_strategy):
+def get_stance_dataset(stance, stance_slug, df, cols, train_num, val_num, dataset_strategy, log_to_wandb=False):
     if not any(f'gold_{stance_slug}' in c for c in df.columns):
         return
     gold_col = [c for c in df.columns if f'gold_{stance_slug}' in c][0]
@@ -78,15 +21,23 @@ def do_stance_detection(stance, stance_slug, df, cols, classifier, batch_size, t
 
     inputs = df.select(pl.concat_list(pl.col(cols + [gold_col]))).to_series(0).to_list()
 
-    dataset = StanceDataset(inputs, stance, train_num=train_num, val_num=val_num, strategy=dataset_strategy)
+    inputs = process_quotes(inputs)
 
-    if train_num + val_num > 0:
+    dataset = StanceDataset(inputs, stance, train_num=train_num, val_num=val_num, strategy=dataset_strategy)
+    return dataset
+
+def do_stance_detection(stance, stance_slug, dataset, classifier, batch_size, text_type, f1s, precisions, recalls, log_to_wandb, topic_path, train_num, val_num, tune_general, general_checkpoint_path):
+    if train_num + val_num > 0 and ("multitask" in classifier.teleprompter or not tune_general):
+        teleprompter_settings = {}
+        if "multitask" in classifier.teleprompter:
+            teleprompter_settings['previous_checkpoint_path'] = general_checkpoint_path
+
         train_dataset = dataset.get_train_data()
         val_dataset = dataset.get_dev_data()
-        classifier.train(train_dataset, val_dataset)
+        classifier.train(train_dataset, val_dataset, teleprompter_settings=teleprompter_settings)
 
         if log_to_wandb:
-            wandb.run.config['teleprompter_settings'] = classifier.teleprompter_settings
+            wandb.run.config[f'{stance_slug}_teleprompter_settings'] = classifier.teleprompter_settings
 
     data = dataset.get_test_data()
     stances = []
@@ -137,13 +88,17 @@ def main():
     use_baseline = False
     train_num = 10
     val_num = 10
-    dataset_strategy = 'ratio:113'
+    dataset_strategy = 'order'
+    tune_general = True
     if not use_baseline:
-        model_name = 'HuggingFaceH4/zephyr-7b-beta'
+        model_name = 'berkeley-nest/Starling-LM-7B-alpha'
+        # model_name = 'mistralai/Mistral-7B-v0.1'
+        model_prompt_template = "GPT4 Correct User: {prompt}<|end_of_turn|>GPT4 Correct Assistant:"
         prompting_method = 'predict'
         opinion_method = 'template'
-        teleprompter = 'prompttune'
-        classifier = StanceClassifier(model_name=model_name, prompting_method=prompting_method, opinion_method=opinion_method, backend="dspy", teleprompter=teleprompter)
+        teleprompter = 'multitaskfinetune'
+        teleprompter_settings = {'num_epochs': 2}
+        classifier = StanceClassifier(model_name=model_name, model_prompt_template=model_prompt_template, prompting_method=prompting_method, opinion_method=opinion_method, backend="dspy", teleprompter=teleprompter)
     else:
         baseline_type = 'annotator'
         if baseline_type == 'neutral' or baseline_type == 'favor':
@@ -184,8 +139,6 @@ def main():
 
             classifier = Classifier()
 
-    messages = ""
-
     # start a new wandb run to track this script
     log_to_wandb = True
 
@@ -204,9 +157,10 @@ def main():
                 "train_num": train_num,
                 "val_num": val_num,
                 "dataset_strategy": dataset_strategy,
-                "prompt_template": str(messages),
+                "model_prompt_template": classifier.model_prompt_template,
                 "teleprompter": classifier.teleprompter,
                 "extended_prompt": classifier.get_extended_prompt(),
+                "tune_general": tune_general,
             }
         )
 
@@ -217,8 +171,7 @@ def main():
     submission_precisions = []
     submission_recalls = []
 
-    # just do the first topic for now
-    # all_topic_stances['topic_stances'] = all_topic_stances['topic_stances'][:1]
+    stance_datasets = {}
 
     for topics_stances in all_topic_stances['topic_stances']:
 
@@ -229,45 +182,59 @@ def main():
 
         topic_path = os.path.join(run_dir_path, f'topic_{topics[0]}')
 
-        topic_comments = None
-        comment_gold_path = os.path.join(topic_path, 'sample_context_comments_gold_stance.parquet.zstd')
-        if os.path.exists(comment_gold_path):
-            topic_comments = pl.read_parquet(comment_gold_path)
-            topic_comments = topic_comments.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('post_all_text'))
+        for stance in stances:
+            stance_slug = stance.replace(' ', '_')
 
-        topic_submissions = None
-        submission_gold_path = os.path.join(topic_path, 'sample_context_submissions_gold_stance.parquet.zstd')
-        if os.path.exists(submission_gold_path):
-            topic_submissions = pl.read_parquet(submission_gold_path)
-            topic_submissions = topic_submissions.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('all_text'))
-        
-        # # sort idxs by length of comment
-        # topic_comments = topic_comments.with_columns(pl.col('body').str.len_chars().alias('body_len'))
-        # topic_comments = topic_comments.sort('body_len')
+            topic_comments = None
+            comment_gold_path = os.path.join(topic_path, f'sample_context_{stance_slug}_comments_gold_stance.parquet.zstd')
+            if os.path.exists(comment_gold_path):
+                topic_comments = pl.read_parquet(comment_gold_path)
+                topic_comments = topic_comments.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('post_all_text'))
 
-        # # sort idxs by length of submission
-        
-        # topic_submissions = topic_submissions.with_columns(pl.col('all_text').str.len_chars().alias('all_text_len'))
-        # topic_submissions = topic_submissions.sort('all_text_len')
+            topic_submissions = None
+            submission_gold_path = os.path.join(topic_path, f'sample_context_{stance_slug}_submissions_gold_stance.parquet.zstd')
+            if os.path.exists(submission_gold_path):
+                topic_submissions = pl.read_parquet(submission_gold_path)
+                topic_submissions = topic_submissions.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('all_text'))
+            
+            if topic_comments is None:
+                continue
+
+            stance_dataset = get_stance_dataset(stance, stance_slug, topic_comments, ['body', 'body_parent', 'post_all_text'], train_num, val_num, dataset_strategy, log_to_wandb)
+            stance_datasets[stance_slug] = stance_dataset
+
+    general_checkpoint_path = None
+    if "tune" in teleprompter and train_num + val_num > 0 and tune_general:
+        stances_dataset = StancesDataset(stance_datasets.values())
+        trainset = stances_dataset.get_train_data()
+        valset = stances_dataset.get_dev_data()
+        classifier.train(trainset, valset, all_tasks=True, teleprompter_settings=teleprompter_settings)
+        if "multitask" in teleprompter:
+            classifier.remove_model()
+            general_checkpoint_path = classifier.checkpoint_path
+
+        if log_to_wandb:
+            wandb.run.config['general_teleprompter_settings'] = classifier.teleprompter_settings
+
+    for topics_stances in all_topic_stances['topic_stances']:
+
+        topics = topics_stances['topics']
+        stances = topics_stances['stances']
+
+        topic_path = os.path.join(run_dir_path, f'topic_{topics[0]}')
 
         for stance in stances:
             stance_slug = stance.replace(' ', '_')
-            if topic_comments is not None and topic_submissions is not None:
-                print(f"Predicting stance for {stance}")
-
-            if topic_comments is not None:
+            if stance_slug in stance_datasets:
                 print("Predicting stance for comments")
+                stance_dataset = stance_datasets[stance_slug]
                 do_stance_detection(
-                    stance, stance_slug, topic_comments, ['body', 'body_parent', 'post_all_text'], classifier, batch_size, 'comment', 
-                    comment_f1s, comment_precisions, comment_recalls, log_to_wandb, topic_path, train_num, val_num, dataset_strategy
+                    stance, stance_slug, stance_dataset, classifier, batch_size, 'comment', 
+                    comment_f1s, comment_precisions, comment_recalls, log_to_wandb, topic_path, train_num, val_num, tune_general, general_checkpoint_path
                 )
 
-                if teleprompter == 'prompttune':
+                if "tune" in teleprompter and train_num + val_num > 0 and ("multitask" in teleprompter or not tune_general):
                     classifier.remove_model()
-
-            # if topic_submissions is not None:
-            #     print("Predicting stance for submissions")
-            #     do_stance_detection(stance, stance_slug, topic_submissions, ['all_text'], classifier, batch_size, 'submission', submission_f1s, log_to_wandb)
 
     avg_comment_f1 = sum(comment_f1s) / len(comment_f1s)
     avg_comment_precision = sum(comment_precisions) / len(comment_precisions)

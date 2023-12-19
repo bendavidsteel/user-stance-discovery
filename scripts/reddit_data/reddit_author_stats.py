@@ -79,10 +79,9 @@ def main():
     fig_dir_path = os.path.join(root_dir_path, 'figs')
     fig.savefig(os.path.join(fig_dir_path, 'reddit_author_stats.png'))
 
-    # save authors who have at least 1000 comments on topics of interest, engaged with at least 5 topics of interest
+    # save authors who have at least 1000 comments on topics of interest
     # and have been active for at least 100 days
     users_df = users_df[users_df['num_comments_on_topics'] >= 1000]
-    users_df = users_df[users_df['num_unique_topics_commented_on'] >= 5]
     users_df = users_df[users_df['posting_duration'] >= 100]
 
     print(f"Number of users: {len(users_df)}")

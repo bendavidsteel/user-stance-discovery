@@ -56,7 +56,9 @@ def evaluate_annotations(df, stance, stance_slug, run_dir_path, agreement_method
         if os.path.exists(disagreement_path):
             current_disagreement_df = pl.read_csv(disagreement_path)
             valid = 'id' in current_disagreement_df.columns and set(current_disagreement_df['id'].to_list()) == set(disagreement_df['id'].to_list())
-        
+        else:
+            current_disagreement_df = None
+
         if not valid:
             disagreement_df.write_csv(os.path.join(run_dir_path, f'topic_{topics[0]}', f'{stance_slug}_{type_name.lower()}_disagreements.csv'))
         
@@ -65,7 +67,7 @@ def evaluate_annotations(df, stance, stance_slug, run_dir_path, agreement_method
             gold_vals = df[annotator_1_col]
 
         elif agreement_method == 'adjudication':
-            if not any('adjudicator' in col for col in current_disagreement_df.columns):
+            if current_disagreement_df is None or not any('adjudicator' in col for col in current_disagreement_df.columns):
                 return
             adjudicated_col = [col for col in current_disagreement_df.columns if 'adjudicator' in col][0]
             annotator_1_col = [col for col in annotated_columns if 'annotator_1' in col][0]
@@ -77,7 +79,7 @@ def evaluate_annotations(df, stance, stance_slug, run_dir_path, agreement_method
         df = df.with_columns(pl.Series(name=f"gold_{stance_slug}_{agreement_method}", values=gold_vals))
         
         df = df.drop(annotated_columns)
-        df.write_parquet(os.path.join(run_dir_path, f'topic_{topics[0]}', f'sample_context_{type_name.lower()}s_gold_stance.parquet.zstd'))
+        df.write_parquet(os.path.join(run_dir_path, f'topic_{topics[0]}', f'sample_context_{stance_slug}_{type_name.lower()}s_gold_stance.parquet.zstd'))
 
 def main():
     this_dir_path = os.path.dirname(os.path.abspath(__file__))

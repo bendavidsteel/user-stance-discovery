@@ -6,10 +6,11 @@ import dspy
 from dspy import dsp
 from dspy.datasets.dataset import Dataset as DSPyDataset
 from dspy.teleprompt import BootstrapFewShot, BootstrapFewShotWithOptuna, BootstrapFewShotWithRandomSearch, LabeledFewShot, BootstrapFinetune
+from sklearn import metrics as sk_metrics
 import torch
 
 import lm
-from prompt_tuning import Prompttune
+import tuning
 
 PROMPT_RESPONSES = [
     {
@@ -24,9 +25,9 @@ PROMPT_RESPONSES = [
 
 TARGET_EXPLANATIONS = {
     'vaccine mandates': "Any laws or policies enforcing the use of vaccines, including in specific communities like companies or the army. Includes creating rewards for vaccine use, or creating disincentives for lack of vaccination. Not laws concerning the rest of COVID policy i.e. lockdowns. A personal opinion on vaccines in general counts as neutral on vaccine mandates. But an opinion that others should get vaccines indicates support for vaccine mandates.",
-    'renter protections': "Opinion on laws protecting renters - rent control, eviction laws, etc.",
-    'liberals': "Opinion on the Liberal Party of Canada. Opinion on an official party representative counts as an opinion on the party, i.e. opinions on Justin Trudeau count towards opinion for Liberals. Liking or disliking another party doesn't imply disliking or liking the party in question.",
-    'conservatives': "Opinion on the Conservative Party of Canada. Opinion on an official party representative counts as an opinion on the party, i.e. opinions on Pierre Poilievre or Erin O'Toole count towards opinion for Conservatives. Liking or disliking another party doesn't imply disliking or liking the party in question.",
+    'renter protections': "Any laws protecting renters - laws limiting landlord actions, capping rent increases, eviction laws, etc.",
+    'liberals': "Opinion on the Liberal Party of Canada Otherwise known as the LPC, or Liberals. Opinion on an official party representative counts as an opinion on the party, i.e. opinions on Justin Trudeau count towards opinion for Liberals. Liking or disliking another party doesn't imply disliking or liking the party in question.",
+    'conservatives': "Opinion on the Conservative Party of Canada. Otherwise known as the CPC, or Conservatives. Opinion on an official party representative counts as an opinion on the party, i.e. opinions on Pierre Poilievre or Erin O'Toole count towards opinion for Conservatives. Liking or disliking another party doesn't imply disliking or liking the party in question.",
     'ndp': "Opinion on the NDP Party of Canada. Opinion on an official party representative counts as an opinion on the party, i.e. opinions on Jagmeet Singh count towards opinion for NDP. Liking or disliking another party doesn't imply disliking or liking the party in question.",
     'gun control': "Opinion on regulations on weapons, including any weapon ban - assault rifles, handguns, or any restrictions on gun ownership.",
     'drug decriminalization': "Includes opinions on harm reduction measures - i.e. safe spaces to use, government provided supply - anywhere where the government is adding legal situations to do normally illegal drugs",
@@ -39,13 +40,13 @@ TARGET_EXPLANATIONS = {
 TARGET_NAMES = {
     'vaccine mandates': "vaccine mandates",
     'renter protections': "renter protections",
-    'liberals': "the Liberal Party of Canada",
-    'conservatives': "the Conservative Party of Canada",
-    'ndp': "the NDP Party of Canada",
+    'liberals': "the Liberal Party",
+    'conservatives': "the Conservative Party",
+    'ndp': "the NDP Party",
     'gun control': "gun control",
     'drug decriminalization': "drug decriminalization",
     'liberal immigration policy': "open immigration policy",
-    'canadian aid to ukraine': "Canadian aid to Ukraine",
+    'canadian aid to ukraine': "aid to Ukraine",
     'funding the cbc': "funding the CBC",
     'french language laws': "French language laws"
 }
@@ -65,7 +66,8 @@ def map_row(r):
     else:
         d['post'] = ""
 
-    d['gold_stance'] = r[3]
+    if len(r) > 3:
+        d['gold_stance'] = r[3]
 
     return d
 
@@ -292,10 +294,33 @@ class StanceDataset:
             return [x.with_inputs('post', 'parent_comment', 'comment', 'target_opinion', 'target_explanation') for x in self.dataset.dev]
         elif self.backend == 'hf':
             return self.dataset[self.train_num:self.train_num + self.val_num]
+        
+
+class StancesDataset(StanceDataset):
+    def __init__(self, stance_datasets):
+        self.backend = 'dspy'
+        self.dataset = DSPyDataset(
+            train_size=sum([d.dataset.train_size for d in stance_datasets]),
+            dev_size=sum([d.dataset.dev_size for d in stance_datasets]),
+            test_size=sum([d.dataset.test_size for d in stance_datasets])
+        )
+        self.dataset._train = []
+        for d in stance_datasets:
+            self.dataset._train += d.dataset._train
+        self.dataset._dev = []
+        for d in stance_datasets:
+            self.dataset._dev += d.dataset._dev
+        self.dataset._test = []
+        for d in stance_datasets:
+            self.dataset._test += d.dataset._test
+
+        random.Random(0).shuffle(self.dataset._train)
+        random.Random(0).shuffle(self.dataset._dev)
+        random.Random(0).shuffle(self.dataset._test)
 
 
 class StanceClassifier:
-    def __init__(self, model_name='zephyr', prompting_method='predict', opinion_method='twostep', backend='dspy', teleprompter='bootstrap'):
+    def __init__(self, model_name, model_prompt_template=None, prompting_method='predict', opinion_method='twostep', backend='dspy', teleprompter='bootstrap'):
         self.backend = backend
         if self.backend == 'hf':
             if model_name == 'mistral':
@@ -313,11 +338,14 @@ class StanceClassifier:
 
         elif self.backend == 'dspy':
             self.model_name = model_name
-            if teleprompter != "prompttune":
+            self.model_prompt_template = model_prompt_template
+            if "tune" not in teleprompter:
                 if "gpt" in model_name:
                     self.model = dspy.OpenAI(self.model_name, os.environ['OPENAI_API_KEY'])
                 else:
-                    self.model = dspy.HFModel(self.model_name, model_kwargs={'torch_dtype': torch.bfloat16, 'use_flash_attention_2': True, 'device_map': 'auto'})
+                    self.model = dspy.HFModel(self.model_name, model_prompt_template=self.model_prompt_template, model_kwargs={'torch_dtype': torch.bfloat16, 'use_flash_attention_2': True, 'device_map': 'auto'})
+                    self.model.kwargs['pad_token_id'] = self.model.tokenizer.pad_token_id
+                    self.model.kwargs['eos_token_id'] = self.model.tokenizer.eos_token_id
                 dspy.settings.configure(lm=self.model)
         
         self.teleprompter = teleprompter
@@ -387,7 +415,7 @@ class StanceClassifier:
                     extras = {'opinion': response.opinion}
                     if 'rationale' in response.keys():
                         extras['rationale'] = response.rationale
-                        self._extra_responses.append(extras)
+                    self._extra_responses.append(extras)
 
                     stance = _parse_opinion_answer(response.opinion)
                 elif self.opinion_method == 'yesno':
@@ -446,7 +474,7 @@ class StanceClassifier:
     def set_target(self, target):
         self.target = target
 
-    def train(self, trainset, valset=None):
+    def train(self, trainset, valset=None, all_tasks=False, teleprompter_settings={}):
 
         self.shot_num = len(trainset)
 
@@ -466,12 +494,15 @@ class StanceClassifier:
         # Compile!
         classifier, config = self._get_classifier()
         class StanceModule(dspy.Module):
-            def __init__(self):
+            def __init__(self, task_map=None):
                 self.classifier = classifier
+                self.task_map = task_map
                 super().__init__()
             
             def forward(self, **kwargs):
                 kwargs.update(config)
+                if self.task_map is not None:
+                    kwargs['task_id'] = self.task_map[kwargs['target_opinion']]
                 return self.classifier(**kwargs)
 
         if self.opinion_method == 'yesno':
@@ -513,45 +544,63 @@ class StanceClassifier:
             for ex in trainset + valset:
                 ex.opinion = ex.gold_stance
 
-            if len(valset) == 0:
-                if self.teleprompter == 'bootstrap':
-                    teleprompter = BootstrapFewShot(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
-                    args = (StanceModule(),)
-                    kwargs = {'trainset': trainset}
-                else:
-                    raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
-                
-                self.classifier = teleprompter.compile(*args, **kwargs)
+            if self.teleprompter == 'bootstrap':
+                teleprompter = BootstrapFewShot(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
+                args = (StanceModule(),)
+                kwargs = {'trainset': trainset}
+            elif self.teleprompter == 'optuna':
+                assert len(valset) > 0, "Optuna search requires a validation set"
+                teleprompter = BootstrapFewShotWithOptuna(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
+                args = (StanceModule(),)
+                kwargs = {'max_demos': len(trainset), 'trainset': trainset, 'valset': valset}
+            elif self.teleprompter == 'random':
+                assert len(valset) > 0, "Random search requires a validation set"
+                teleprompter = BootstrapFewShotWithRandomSearch(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset), num_threads=1)
+                args = (StanceModule(),)
+                kwargs = {'trainset': trainset, 'valset': valset}
+            elif self.teleprompter == 'finetune':
+                teleprompter = tuning.FineTune()
+                args = (StanceModule(),)
+                default_teleprompter_settings = {'method': 'ia3', 'lr': 1e-3, 'num_epochs': 50, 'gradient_accumulation_steps': 1}
+                for k, v in default_teleprompter_settings.items():
+                    if k not in teleprompter_settings:
+                        teleprompter_settings[k] = v
+                self.teleprompter_settings = teleprompter_settings
+                kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
+                kwargs.update(self.teleprompter_settings)
+            elif self.teleprompter == 'multitaskfinetune':
+                teleprompter = tuning.FineTune()
+                args = (StanceModule(),)
+                default_teleprompter_settings = {'method': 'ia3', 'gradient_accumulation_steps': 1}
+                default_teleprompter_settings['lr'] = 1e-3
+                default_teleprompter_settings['num_epochs'] = 30 if all_tasks else 10
+                for k, v in default_teleprompter_settings.items():
+                    if k not in teleprompter_settings:
+                        teleprompter_settings[k] = v
+                self.teleprompter_settings = teleprompter_settings
+                kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
+                kwargs.update(self.teleprompter_settings)
+            elif self.teleprompter == "prompttune":
+                teleprompter = tuning.PromptTune()
+                args = (StanceModule(),)
+                self.teleprompter_settings = {'lr': 1e-3, 'num_epochs': 60, 'gradient_accumulation_steps': 8}
+                kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
+                kwargs.update(self.teleprompter_settings)
+            elif self.teleprompter == 'multitaskprompttune':
+                teleprompter = tuning.MultiTaskPromptTune()
+                args = (StanceModule(),)
+                num_epochs = 50 if all_tasks else 10
+                lr = 1e-4 if all_tasks else 1e-5
+                self.teleprompter_settings = {'lr': lr, 'num_epochs': num_epochs, 'gradient_accumulation_steps': 8}
+                kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
+                kwargs.update(self.teleprompter_settings)
+                task_names = sorted(list(set([ex.target_opinion for ex in trainset + valset])))
+                kwargs['task_map'] = {target: idx for idx, target in enumerate(task_names)}
             else:
-                if self.teleprompter == 'optuna':
-                    teleprompter = BootstrapFewShotWithOptuna(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
-                    args = (StanceModule(),)
-                    kwargs = {'max_demos': len(trainset), 'trainset': trainset, 'valset': valset}
-                elif self.teleprompter == 'random':
-                    teleprompter = BootstrapFewShotWithRandomSearch(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset), num_threads=1)
-                    args = (StanceModule(),)
-                    kwargs = {'trainset': trainset, 'valset': valset}
-                elif self.teleprompter == 'finetune':
-                    self.teleprompter_settings = {'lr': 1e-5, 'epochs': 5}
-                    teleprompter = BootstrapFinetune(metric=validate_context_and_answer)
-                    labelled_teleprompter = LabeledFewShot(k=len(trainset))
-                    teleprompter.teleprompter = BootstrapFewShot(metric=validate_context_and_answer,
-                                             max_bootstrapped_demos=999999,
-                                             max_labeled_demos=len(trainset))
-                    teacher = labelled_teleprompter.compile(StanceModule(), trainset=trainset)
-                    args = (StanceModule(),)
-                    kwargs = {'teacher': teacher, 'trainset': trainset, 'valset': valset, 'target': self.model_name, 'bsize': 1, 'bf16': True, 'peft': True}
-                    kwargs.update(self.teleprompter_settings)
-                elif self.teleprompter == "prompttune":
-                    teleprompter = Prompttune()
-                    args = (StanceModule(),)
-                    self.teleprompter_settings = {'lr': 1e-5, 'num_epochs': 10, 'batch_size': 8}
-                    kwargs = {'model_name': self.model_name, 'trainset': trainset, 'valset': valset}
-                    kwargs.update(self.teleprompter_settings)
-                else:
-                    raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
+                raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
                 
-                self.classifier = teleprompter.compile(*args, **kwargs)
+            self.classifier = teleprompter.compile(*args, **kwargs)
+            self.checkpoint_path = teleprompter.checkpoint_path
 
     def _get_classifier(self, comment=True):
         if self.opinion_method == 'onestep':
@@ -607,8 +656,21 @@ class StanceClassifier:
         return self.prompting_text
     
     def remove_model(self):
-        self.classifier.predictors()[0].lm.model.to('cpu')
+        if getattr(self.classifier, 'lm', None) is not None:
+            self.classifier.lm.model.to('cpu')
+        else:
+            self.classifier.predictors()[0].lm.model.to('cpu')
         del self.classifier.predictors()[0]
+
+    def load_model(self, model_name, checkpoint_path, trainset):
+        if self.teleprompter == 'finetune':
+            teleprompter = tuning.FineTune()
+        elif self.teleprompter == 'prompttune':
+            teleprompter = tuning.PromptTune()
+
+        classifier = self._get_classifier()[0]
+        model_prompt_template = self.model_prompt_template
+        self.classifier = teleprompter.load(model_name, checkpoint_path, trainset, classifier, model_prompt_template)
     
 def _parse_yesno_answer(response):
     response = response.split('\n')[0].lower()
@@ -701,3 +763,105 @@ class MultiComparison(dspy.Module):
         stance = stance_counts[0][0]
         return [c for c in completions if _parse_opinion_answer(c.opinion) == stance][0]
     
+
+def get_f1_score(tp, fp, fn):
+    precision = tp / (tp + fp) if tp + fp > 0 else 0
+    recall = tp / (tp + fn) if tp + fn > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if precision + recall > 0 else 0
+    return precision, recall, f1
+
+def get_stance_f1_score(gold_stances, stances, return_all=False):
+
+    num_f_tp = 0
+    num_f_fp = 0
+    num_f_fn = 0
+    num_a_tp = 0
+    num_a_fp = 0
+    num_a_fn = 0
+    num_n_tp = 0
+    num_n_fp = 0
+    num_n_fn = 0
+
+    for gold_stance, stance in zip(gold_stances, stances):
+        assert stance in ['favor', 'against', 'neutral']
+        assert gold_stance in ['favor', 'against', 'neutral']
+        if stance == 'favor' and gold_stance == 'favor':
+            num_f_tp += 1
+        if stance == 'favor' and gold_stance != 'favor':
+            num_f_fp += 1
+        if stance != 'favor' and gold_stance == 'favor':
+            num_f_fn += 1
+        if stance == 'against' and gold_stance == 'against':
+            num_a_tp += 1
+        if stance == 'against' and gold_stance != 'against':
+            num_a_fp += 1
+        if stance != 'against' and gold_stance == 'against':
+            num_a_fn += 1
+        if stance == 'neutral' and gold_stance == 'neutral':
+            num_n_tp += 1
+        if stance == 'neutral' and gold_stance != 'neutral':
+            num_n_fp += 1
+        if stance != 'neutral' and gold_stance == 'neutral':
+            num_n_fn += 1
+
+    # calculate total F1 score as average of F1 scores for each stance
+    # calculate f1 score for favor
+    # calculate precision for favor
+
+    favor_precision, favor_recall, favor_f1 = 0, 0, 0
+    against_precision, against_recall, against_f1 = 0, 0, 0
+    neutral_precision, neutral_recall, neutral_f1 = 0, 0, 0
+    f1, precision, recall = 0, 0, 0
+
+    if (num_f_tp + num_f_fn) > 0:
+        favor_precision, favor_recall, favor_f1 = get_f1_score(num_f_tp, num_f_fp, num_f_fn)
+
+    if (num_a_tp + num_a_fn) > 0:
+        against_precision, against_recall, against_f1 = get_f1_score(num_a_tp, num_a_fp, num_a_fn)
+
+    if (num_n_tp + num_n_fn) > 0:
+        neutral_precision, neutral_recall, neutral_f1 = get_f1_score(num_n_tp, num_n_fp, num_n_fn)
+
+    if (num_f_tp + num_f_fn) > 0 and (num_a_tp + num_a_fn) > 0:
+        f1 = (favor_f1 + against_f1) / 2
+        precision = (favor_precision + against_precision) / 2
+        recall = (favor_recall + against_recall) / 2
+    elif (num_f_tp + num_f_fn) > 0:
+        f1 = favor_f1
+        precision = favor_precision
+        recall = favor_recall
+    elif (num_a_tp + num_a_fn) > 0:
+        f1 = against_f1
+        precision = against_precision
+        recall = against_recall
+    else:
+        f1 = 0
+        precision = 0
+        recall = 0
+
+    if return_all:
+        return {
+            'favor': {
+                'precision': favor_precision,
+                'recall': favor_recall,
+                'f1': favor_f1
+            },
+            'against': {
+                'precision': against_precision,
+                'recall': against_recall,
+                'f1': against_f1
+            },
+            'neutral': {
+                'precision': neutral_precision,
+                'recall': neutral_recall,
+                'f1': neutral_f1
+            },
+            'macro': {
+                'precision': precision,
+                'recall': recall,
+                'f1': f1
+            },
+            'test_num': len(gold_stances)
+        }
+    else:
+        return precision, recall, f1

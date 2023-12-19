@@ -83,3 +83,17 @@ def filter_active_user_contexts(comment_df, submission_df, active_users):
     context_submission_df = submission_df.filter(pl.col('permalink').is_in(unique_post_permalinks))
 
     return context_comment_df, context_submission_df
+
+
+def process_quotes(comments_context):
+    def process_quote(t):
+        if "&gt;" in t:
+            t = re.sub(r'&gt;(.*)\n', r'"\1"\n', t)
+        return t
+
+    for comment_context in comments_context:
+        process_quote(comment_context[0])
+        if comment_context[1] is not None:
+            process_quote(comment_context[1])
+
+    return comments_context
