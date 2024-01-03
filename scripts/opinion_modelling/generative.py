@@ -8,7 +8,8 @@ import tqdm
 import opinions
 
 class SocialPlatform:
-    def __init__(self):
+    def __init__(self, num_opinions=2):
+        self.num_opinions = num_opinions
         self.reset()
 
     def reset(self):
@@ -66,9 +67,9 @@ class SocialPlatform:
     def get_post_comment_positions(self, post_ids, limit):
         comment_dfs = self.get_post_comments(post_ids, limit=limit)
         if len(comment_dfs) == 0:
-            return torch.zeros(len(post_ids), limit, 2), torch.zeros(len(post_ids), limit), [{} for _ in range(len(post_ids))]
+            return torch.zeros(len(post_ids), limit, self.num_opinions), torch.zeros(len(post_ids), limit), [{} for _ in range(len(post_ids))]
         
-        comment_positions = torch.zeros(len(post_ids), limit, 2)
+        comment_positions = torch.zeros(len(post_ids), limit, self.num_opinions)
         comment_mask = torch.zeros(len(post_ids), limit)
         idx_to_ids = [{} for _ in range(len(post_ids))]
         for i, comments in enumerate(comment_dfs):
@@ -82,9 +83,9 @@ class SocialPlatform:
     def get_post_recommended_comment_positions(self, post_ids, limit=5):
         comments_dfs = self.get_post_comments(post_ids, limit=None)
         if len(comments_dfs) == 0:
-            return torch.zeros(len(post_ids), limit, 2), torch.zeros(len(post_ids), limit), [{} for _ in range(len(post_ids))]
+            return torch.zeros(len(post_ids), limit, self.num_opinions), torch.zeros(len(post_ids), limit), [{} for _ in range(len(post_ids))]
         
-        comment_positions = torch.zeros(len(post_ids), limit, 2)
+        comment_positions = torch.zeros(len(post_ids), limit, self.num_opinions)
         comment_mask = torch.zeros(len(post_ids), limit)
         idx_to_ids = [{} for _ in range(len(post_ids))]
         for i, comments in enumerate(comments_dfs):
@@ -108,13 +109,13 @@ class SocialPlatform:
     
     def get_comments_positions(self):
         if len(self.comments) == 0:
-            return torch.zeros(0, 2), {}
+            return torch.zeros(0, self.num_opinions), {}
         idx_to_id = {idx: id for idx, id in enumerate(self.comments.index.values)}
         return torch.stack([t for t in self.comments['position'].values]), idx_to_id
     
     def get_posts_positions(self, ids=None):
         if len(self.posts) == 0:
-            return torch.zeros(0, 2), {}
+            return torch.zeros(0, self.num_opinions), {}
         if ids:
             posts = self.posts.loc[ids]
             # ensure order is kept
@@ -157,7 +158,8 @@ class SocialGenerativeModel:
             reply_att_scale=0.1,
             post_att_loc=0.2,
             post_att_scale=0.1,
-            content_scale=1.
+            content_scale=1.,
+            num_opinions=2,
         ):
         self.num_users = num_users
 
@@ -181,10 +183,10 @@ class SocialGenerativeModel:
 
         self.content_scale = content_scale
 
-        self.num_opinions = 2
+        self.num_opinions = num_opinions
         self.opinion_positions = [-1, 0, 1]
 
-        self.platform = SocialPlatform()
+        self.platform = SocialPlatform(num_opinions=self.num_opinions)
 
     def reset(self):
         self.reset_users()
@@ -201,7 +203,7 @@ class SocialGenerativeModel:
         user_dicts = []
         for i in range(self.num_users):
             initial_dist = torch.distributions.Uniform(-1, 1)
-            initial_pos = initial_dist.sample((2,))
+            initial_pos = initial_dist.sample((self.num_opinions,))
 
             sbc_exponent = sbc_exponent_dist.sample().type(dtype=torch.float32)
             sus = sus_dist.sample().clamp(0., 1.).type(dtype=torch.float32)
@@ -245,7 +247,7 @@ class SocialGenerativeModel:
     
     def get_users_positions(self):
         if len(self.users) == 0:
-            return torch.zeros(0, 2)
+            return torch.zeros(0, self.num_opinions)
         return torch.stack([t for t in self.users['position'].values])
 
     def get_user_content(self):
@@ -316,7 +318,7 @@ class SocialGenerativeModel:
             users_pos = self.get_users_positions()
             sbc_exponent = self.get_users_tensor('sbc_exponent')
             posts_pos, idx_to_id = self.platform.get_recommended_posts_positions()
-            post_content = posts_pos.expand((self.num_users, posts_pos.shape[0], 2))
+            post_content = posts_pos.expand((self.num_users, posts_pos.shape[0], self.num_opinions))
             post_content_mask = torch.ones((self.num_users, posts_pos.shape[0]), dtype=torch.float32)
 
             # TODO allow to not choose a post

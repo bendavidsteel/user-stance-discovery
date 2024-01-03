@@ -1,7 +1,9 @@
+import json
 import os
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 import tqdm
 
@@ -160,13 +162,25 @@ class RedditInteractionDataset(SocialInteractionDataset):
 
 
 class OpinionTimelineDataset:
-    def __init__(self, comment_df, stance_columns):
+    def __init__(self, comment_df, stance_columns, aggregation="mean", halflife=50.):
+        assert 'createtime' in comment_df.columns, "createtime column not found"
+        assert 'user_id' in comment_df.columns, "user_id column not found"
+        assert 'comment_id' in comment_df.columns, "comment_id column not found"
         self.comment_df = comment_df
         self.num_opinions = len(stance_columns)
         self.stance_columns = stance_columns
+        self.num_people = len(self.comment_df['user_id'].unique())
+        self.max_time_step = self.comment_df['createtime'].max()
+
+        assert aggregation in ["mean", "sliding_exp"]
+        self.aggregation = aggregation
+        self.halflife = halflife
 
     def __getitem__(self, time_idx):
-        comment_df = self.comment_df[self.comment_df['createtime'] <= time_idx]
+        if self.aggregation == "mean":
+            comment_df = self.comment_df
+        elif self.aggregation == "sliding_exp":
+            comment_df = self.comment_df[self.comment_df['createtime'] <= time_idx]
 
         if len(comment_df) == 0:
             return np.zeros((0, self.num_opinions)), np.zeros((0, self.num_opinions))
@@ -183,12 +197,20 @@ class OpinionTimelineDataset:
             user_opinions = user_comments[self.stance_columns].values
             opinion_sequences[i, :len(user_opinions), :] = user_opinions
             sequence_mask[i, :len(user_opinions)] = 1
-        opinion_snapshots = opinions.sliding_window(opinion_sequences, sequence_mask, halflife=1.)
+
+        if self.aggregation == "mean":
+            opinion_snapshots = np.mean(opinion_sequences, axis=1)
+        elif self.aggregation == "sliding_exp":
+            opinion_snapshots = opinions.sliding_window(opinion_sequences, sequence_mask, halflife=self.halflife)
+
         return opinion_snapshots, users
 
 class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
-    def __init__(self, num_people, max_time_step):
-        generative_model = generative.SocialGenerativeModel(num_users=num_people)
+    def __init__(self, num_people, max_time_step, num_opinions, **kwargs):
+        generative_model = generative.SocialGenerativeModel(
+            num_users=num_people,
+            num_opinions=num_opinions,
+        )
 
         time_step = 0
         generative_model.reset()
@@ -217,4 +239,83 @@ class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
         stance_columns = [f'stance_{i}' for i in range(num_opinions)]
         comments_df[stance_columns] = np.array([np.array(o) for o in comments_df['opinions']])
 
-        super().__init__(comments_df, stance_columns)
+        super().__init__(comments_df, stance_columns, **kwargs)
+
+
+class RedditOpinionTimelineDataset(OpinionTimelineDataset):
+    def __init__(self, **kwargs):
+
+        this_dir_path = os.path.dirname(os.path.realpath(__file__))
+        root_dir_path = os.path.join(this_dir_path, "..", "..")
+        topics_dir_path = os.path.join(root_dir_path, "data", "reddit", "1sub_1year", "topics_minilm_0_2")
+        with open(os.path.join(topics_dir_path, "topic_stances.json"), "r") as f:
+            topics_stances = json.load(f)
+
+        comments_df = None
+        for topic_stances in topics_stances['topic_stances']:
+            topic_path = os.path.join(topics_dir_path, f"topic_{topic_stances['topics'][0]}")
+            for stance in topic_stances['stances']:
+                stance_slug = stance.replace(" ", "_")
+                stance_path = os.path.join(topic_path, stance_slug)
+
+                if not os.path.exists(stance_path):
+                    continue
+
+                best_macro_fbeta = 0
+                beta = 0.5
+                best_dir_name = None
+                for dir_name in os.listdir(stance_path):
+                    metrics_path = os.path.join(stance_path, dir_name, "metrics.json")
+                    with open(metrics_path, "r") as f:
+                        metrics = json.load(f)
+                    fbeta = (1 + beta**2) * metrics['macro']['precision'] * metrics['macro']['recall'] / (beta**2 * metrics['macro']['precision'] + metrics['macro']['recall'])
+                    if fbeta > best_macro_fbeta and metrics['macro']['precision'] > 0.5:
+                        best_macro_fbeta = fbeta
+                        best_dir_name = dir_name
+                
+                if best_dir_name is None:
+                    continue
+
+                stance_path = os.path.join(stance_path, best_dir_name)
+                stance_comments_df = pl.read_parquet(
+                    os.path.join(stance_path, "predicted_comments.parquet.zstd"), 
+                    columns=['author', 'id', 'created_utc', 'body', 'body_parent', 'post_all_text', 'stance']
+                )
+                
+                # rename stance column to stance_{stance}
+                stance_comments_df = stance_comments_df.rename(
+                    {f"stance": f"stance_{stance_slug}"}
+                )
+
+                if comments_df is None:
+                    comments_df = stance_comments_df
+                else:
+                    comments_df = pl.concat([comments_df, stance_comments_df], how='diagonal')    
+
+        stance_columns = [col for col in comments_df.columns if "stance" in col]
+
+        comments_df = comments_df.rename(
+            {
+                "author": "user_id",
+                "id": "comment_id",
+                "created_utc": "createtime",
+                "body": "comment",
+                "body_parent": "parent_comment",
+                "post_all_text": "post",
+            }
+        )
+
+        comments_df = comments_df.to_pandas()
+
+        # map neutral to 0, favor to 1, against to -1
+        for stance_column in stance_columns:
+            comments_df[stance_column] = comments_df[stance_column].apply(lambda x: 1 if x == "favor" else (-1 if x == "against" else 0))
+
+        # round createtime to days, and rescale to start at 0
+        comments_df['createtime'] = pd.to_datetime(comments_df['createtime'], unit='s')
+        comments_df['createtime'] = comments_df['createtime'].dt.floor('d')
+        comments_df['createtime'] = (comments_df['createtime'] - comments_df['createtime'].min()).dt.days
+
+        super().__init__(comments_df, stance_columns, **kwargs)
+
+    def 

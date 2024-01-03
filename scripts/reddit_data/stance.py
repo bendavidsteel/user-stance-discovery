@@ -660,13 +660,18 @@ class StanceClassifier:
             self.classifier.lm.model.to('cpu')
         else:
             self.classifier.predictors()[0].lm.model.to('cpu')
-        del self.classifier.predictors()[0]
 
     def load_model(self, model_name, checkpoint_path, trainset):
         if self.teleprompter == 'finetune':
             teleprompter = tuning.FineTune()
+        elif self.teleprompter == 'multitaskfinetune':
+            teleprompter = tuning.FineTune()
         elif self.teleprompter == 'prompttune':
             teleprompter = tuning.PromptTune()
+        elif self.teleprompter == 'multitaskprompttune':
+            teleprompter = tuning.MultiTaskPromptTune()
+        else:
+            raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
 
         classifier = self._get_classifier()[0]
         model_prompt_template = self.model_prompt_template
@@ -770,7 +775,10 @@ def get_f1_score(tp, fp, fn):
     f1 = 2 * (precision * recall) / (precision + recall) if precision + recall > 0 else 0
     return precision, recall, f1
 
-def get_stance_f1_score(gold_stances, stances, return_all=False):
+def get_fbeta_score(p, r, w):
+    return (1 + w**2) * (p * r) / ((w**2 * p) + r) if p + r > 0 else 0
+
+def get_stance_f1_score(gold_stances, stances, return_all=False, beta=0.5):
 
     num_f_tp = 0
     num_f_fp = 0
@@ -808,34 +816,41 @@ def get_stance_f1_score(gold_stances, stances, return_all=False):
     # calculate f1 score for favor
     # calculate precision for favor
 
-    favor_precision, favor_recall, favor_f1 = 0, 0, 0
-    against_precision, against_recall, against_f1 = 0, 0, 0
-    neutral_precision, neutral_recall, neutral_f1 = 0, 0, 0
-    f1, precision, recall = 0, 0, 0
+    favor_precision, favor_recall, favor_f1, favor_fbeta = 0, 0, 0, 0
+    against_precision, against_recall, against_f1, against_fbeta = 0, 0, 0, 0
+    neutral_precision, neutral_recall, neutral_f1, neutral_fbeta = 0, 0, 0, 0
+    f1, precision, recall, fbeta = 0, 0, 0, 0
 
     if (num_f_tp + num_f_fn) > 0:
         favor_precision, favor_recall, favor_f1 = get_f1_score(num_f_tp, num_f_fp, num_f_fn)
+        favor_fbeta = get_fbeta_score(favor_precision, favor_recall, beta)
 
     if (num_a_tp + num_a_fn) > 0:
         against_precision, against_recall, against_f1 = get_f1_score(num_a_tp, num_a_fp, num_a_fn)
+        against_fbeta = get_fbeta_score(against_precision, against_recall, beta)
 
     if (num_n_tp + num_n_fn) > 0:
         neutral_precision, neutral_recall, neutral_f1 = get_f1_score(num_n_tp, num_n_fp, num_n_fn)
+        neutral_fbeta = get_fbeta_score(neutral_precision, neutral_recall, beta)
 
     if (num_f_tp + num_f_fn) > 0 and (num_a_tp + num_a_fn) > 0:
         f1 = (favor_f1 + against_f1) / 2
+        fbeta = (favor_fbeta + against_fbeta) / 2
         precision = (favor_precision + against_precision) / 2
         recall = (favor_recall + against_recall) / 2
     elif (num_f_tp + num_f_fn) > 0:
         f1 = favor_f1
+        fbeta = favor_fbeta
         precision = favor_precision
         recall = favor_recall
     elif (num_a_tp + num_a_fn) > 0:
         f1 = against_f1
+        fbeta = against_fbeta
         precision = against_precision
         recall = against_recall
     else:
         f1 = 0
+        fbeta = 0
         precision = 0
         recall = 0
 
@@ -844,24 +859,28 @@ def get_stance_f1_score(gold_stances, stances, return_all=False):
             'favor': {
                 'precision': favor_precision,
                 'recall': favor_recall,
-                'f1': favor_f1
+                'f1': favor_f1,
+                f'f{beta}': favor_fbeta
             },
             'against': {
                 'precision': against_precision,
                 'recall': against_recall,
-                'f1': against_f1
+                'f1': against_f1,
+                f'f{beta}': against_fbeta
             },
             'neutral': {
                 'precision': neutral_precision,
                 'recall': neutral_recall,
-                'f1': neutral_f1
+                'f1': neutral_f1,
+                f'f{beta}': neutral_fbeta
             },
             'macro': {
                 'precision': precision,
                 'recall': recall,
-                'f1': f1
+                'f1': f1,
+                f'f{beta}': fbeta
             },
             'test_num': len(gold_stances)
         }
     else:
-        return precision, recall, f1
+        return precision, recall, f1, fbeta

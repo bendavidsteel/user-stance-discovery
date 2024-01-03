@@ -103,9 +103,6 @@ class Tune:
         # ensure initial performance is equivalent to zero shot performance
         if valset:
             best_score = self._validate_initial_performance(eval_dataloader)
-
-        def get_fbeta(p, r, w):
-            return (1 + w**2) * (p * r) / ((w**2 * p) + r) if p + r > 0 else 0
         
         beta = 0.5
         if self.log_to_wandb:
@@ -144,15 +141,14 @@ class Tune:
             metrics_to_log = {"train_epoch_loss": train_epoch_loss}
 
             if valset:
-                eval_precision, eval_recall, eval_f1 = self._evaluate(eval_dataloader)
-                fbeta = get_fbeta(eval_precision, eval_recall, beta)
+                eval_precision, eval_recall, eval_f1, eval_fbeta = self._evaluate(eval_dataloader)
 
-                if fbeta > best_score:
-                    best_score = fbeta
+                if eval_fbeta > best_score:
+                    best_score = eval_fbeta
                     self.model.save_pretrained(self.checkpoint_path)
 
                 eval_str = f"{eval_f1=} {eval_precision=} {eval_recall=}"
-                metrics_to_log.update({"eval_f1": eval_f1, "eval_precision": eval_precision, "eval_recall": eval_recall, "fbeta": fbeta})
+                metrics_to_log.update({"eval_f1": eval_f1, "eval_precision": eval_precision, "eval_recall": eval_recall, "fbeta": eval_fbeta})
 
 
             print(f"{epoch=}: {train_epoch_loss=}" + (f" {eval_str}" if valset else ""))
@@ -221,9 +217,9 @@ class Tune:
             eval_preds.append(stance._parse_opinion_answer(output))
             eval_gold.append(stance._parse_opinion_answer(gold))
         
-        eval_precision, eval_recall, eval_f1 = stance.get_stance_f1_score(eval_gold, eval_preds)
+        eval_precision, eval_recall, eval_f1, eval_fbeta = stance.get_stance_f1_score(eval_gold, eval_preds)
 
-        return eval_precision, eval_recall, eval_f1
+        return eval_precision, eval_recall, eval_f1, eval_fbeta
 
 
     def _ex_to_dict(self, ex):
@@ -290,7 +286,7 @@ class FineTune(Tune):
         return peft_config
     
     def _validate_initial_performance(self, eval_dataloader):
-        eval_precision, eval_recall, eval_f1 = self._evaluate(eval_dataloader)
+        eval_precision, eval_recall, eval_f1, eval_fbeta = self._evaluate(eval_dataloader)
         print(f"Initial F1: {eval_f1=}")
         if self.log_to_wandb:
             metrics_to_log = {'eval_precision': eval_precision, 'eval_recall': eval_recall, 'eval_f1': eval_f1}
@@ -382,7 +378,7 @@ class PromptTune(Tune):
         # assert (test_trainset_input_ids == test_input_ids[:, -test_trainset_input_ids.shape[1]:]).all().cpu().item()
         # assert torch.allclose(test_peft_input_embeds, test_input_embeds)
 
-        eval_precision, eval_recall, eval_f1 = self._evaluate(eval_dataloader)
+        eval_precision, eval_recall, eval_f1, eval_fbeta = self._evaluate(eval_dataloader)
         print(f"Initial F1: {eval_f1=}")
         if self.log_to_wandb:
             wandb.log({'eval_precision': eval_precision, 'eval_recall': eval_recall, 'eval_f1': eval_f1})
@@ -437,7 +433,7 @@ class MultiTaskPromptTune(PromptTune):
     
     def _validate_initial_performance(self, eval_dataloader):
 
-        eval_precision, eval_recall, eval_f1 = self._evaluate(eval_dataloader)
+        eval_precision, eval_recall, eval_f1, eval_fbeta = self._evaluate(eval_dataloader)
         print(f"Initial F1: {eval_f1=}")
         if self.log_to_wandb:
             wandb.log({'eval_precision': eval_precision, 'eval_recall': eval_recall, 'eval_f1': eval_f1})
@@ -509,6 +505,6 @@ class MultiTaskPromptTune(PromptTune):
             eval_preds.append(stance._parse_opinion_answer(output))
             eval_gold.append(stance._parse_opinion_answer(gold))
         
-        eval_precision, eval_recall, eval_f1 = stance.get_stance_f1_score(eval_gold, eval_preds)
+        eval_precision, eval_recall, eval_f1, eval_fbeta = stance.get_stance_f1_score(eval_gold, eval_preds)
 
-        return eval_precision, eval_recall, eval_f1
+        return eval_precision, eval_recall, eval_f1, eval_fbeta

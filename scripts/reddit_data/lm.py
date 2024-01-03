@@ -4,28 +4,32 @@ import transformers
 import torch
 
 class AutoRegressiveLanguageModel:
-    def __init__(self, model_name, system_prompt=None, model_initial_kwargs={}, tokenizer_initial_kwargs={}, generate_kwargs={}, tokenizer_kwargs={}):
+    def __init__(self, model_name, system_prompt=None, use_regex=False, model_initial_kwargs={}, tokenizer_initial_kwargs={}, generate_kwargs={}, tokenizer_kwargs={}):
         self.device = 'cuda'
         self.model_name = model_name
         self.system_prompt = system_prompt
+        self.use_regex = use_regex
 
         model_kwargs = {'torch_dtype': torch.float16, 'device_map': 'auto'}
         model_kwargs.update(model_initial_kwargs)
 
-        tokenizer_kwargs = {'use_fast': True}
-        tokenizer_kwargs.update(tokenizer_initial_kwargs)
+        tokenizer_initial_kwargs.update({'use_fast': True})
 
-        self.guided_model = outline_models.transformers(
-            self.model_name, 
-            device='cuda', 
-            model_kwargs=model_kwargs, 
-            tokenizer_kwargs=tokenizer_kwargs
-        )
+        if self.use_regex:
+            self.guided_model = outline_models.transformers(
+                self.model_name, 
+                device='cuda', 
+                model_kwargs=model_kwargs, 
+                tokenizer_kwargs=tokenizer_kwargs
+            )
+        else:
+            self.model = transformers.AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
+            self.tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name, **tokenizer_initial_kwargs)
 
         self.generate_kwargs = {}
         self.generate_kwargs.update(generate_kwargs)
-        self.tokenizer_kwargs = {'return_tensors': 'pt', 'add_special_tokens': False, 'padding': True, 'truncation': True, 'max_length':1024}
-        self.tokenizer_kwargs.update(tokenizer_kwargs)
+        self.tokenizer_generate_kwargs = {'return_tensors': 'pt', 'add_special_tokens': False, 'padding': True, 'truncation': True, 'max_length':1024}
+        self.tokenizer_generate_kwargs.update(tokenizer_kwargs)
 
     def _format(self, prompt):
         raise NotImplementedError()
@@ -35,14 +39,15 @@ class AutoRegressiveLanguageModel:
     
     def __call__(self, prompts, regex=None):
         prompts = [self._format(prompt) for prompt in prompts]
-        if regex:
+        if self.use_regex:
             decoded = []
             regex_model = outlines_generate.regex(self.guided_model, regex)
             for prompt in prompts:
                 decoded.append(regex_model(prompt))
 
         else:
-            encodes = self.tokenizer(prompts, max_length=max([len(p) for p in prompts]), **self.tokenizer_kwargs)
+            self.tokenizer_generate_kwargs['max_length'] = max([len(p) for p in prompts])
+            encodes = self.tokenizer(prompts, **self.tokenizer_generate_kwargs)
             model_inputs = encodes.to(self.model.device)
             with torch.no_grad():
                 generated_ids = self.model.generate(**model_inputs, **self.generate_kwargs)
@@ -82,8 +87,8 @@ class Zephyr(AutoRegressiveLanguageModel):
         # self.model = transformers.AutoModelForCausalLM.from_pretrained("HuggingFaceH4/zephyr-7b-alpha", torch_dtype=torch.bfloat16, device_map="auto")#, use_flash_attention_2=True)
         model_name = 'HuggingFaceH4/zephyr-7b-beta'
         system_prompt = "You are an expert text annotator, who thinks through problems step by step."
-        generate_kwargs = {'max_new_tokens': 1024, 'do_sample': True, 'temperature': 0.7, 'top_k': 50, 'top_p': 0.95, 'pad_token_id': self.tokenizer.eos_token_id}
-        super().__init__(model_name, system_prompt=system_prompt, generate_kwargs=generate_kwargs)
+        super().__init__(model_name, system_prompt=system_prompt)
+        self.generate_kwargs = {'max_new_tokens': 1024, 'do_sample': True, 'temperature': 0.7, 'top_k': 50, 'top_p': 0.95, 'pad_token_id': self.tokenizer.eos_token_id}
 
     def _format(self, prompt):
         # We use the tokenizer's chat template to format each message - see https://huggingface.co/docs/transformers/main/en/chat_templating
@@ -94,7 +99,12 @@ class Zephyr(AutoRegressiveLanguageModel):
             },
             {"role": "user", "content": prompt},
         ]
-        prompt = self.guided_model.tokenizer.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        if self.use_regex:
+            tokenizer = self.guided_model.tokenizer.tokenizer
+        else:
+            tokenizer = self.tokenizer
+
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         return prompt
     
     def _unformat(self, decoded, prompt):

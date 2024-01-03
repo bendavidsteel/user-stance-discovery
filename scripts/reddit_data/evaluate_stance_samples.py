@@ -5,7 +5,7 @@ import polars as pl
 import tqdm
 import wandb
 
-from stance import StanceClassifier, StanceDataset, StancesDataset, TARGET_EXPLANATIONS, TARGET_NAMES, get_stance_f1_score
+from stance import StanceClassifier, StanceDataset, StancesDataset, TARGET_EXPLANATIONS, TARGET_NAMES, get_stance_f1_score, get_fbeta_score
 from utils import process_quotes
 
 
@@ -59,16 +59,35 @@ def do_stance_detection(stance, stance_slug, dataset, classifier, batch_size, te
                     'model_output': classifier._extra_responses,
                 })
 
-    precision, recall, f1 = get_stance_f1_score(gold_stances, stances)
+    metrics = get_stance_f1_score(gold_stances, stances, return_all=True)
+
+    f1 = metrics['macro']['f1']
+    precision = metrics['macro']['precision']
+    recall = metrics['macro']['recall']
 
     with open(os.path.join(topic_path, f'{stance_slug}_{text_type}_incorrect_cases.json'), 'w') as f:
         json.dump(incorrect_cases, f)
 
     print(f"{stance} {text_type}s: F1 score: {round(f1, 4)}, precision: {round(precision, 4)}, recall: {round(recall, 4)}")
     if log_to_wandb:
+        beta = 0.5
         wandb.run.summary[f"{stance}_{text_type}_f1"] = f1
         wandb.run.summary[f"{stance}_{text_type}_precision"] = precision
         wandb.run.summary[f"{stance}_{text_type}_recall"] = recall
+        wandb.run.summary[f"{stance}_{text_type}_f{beta}"] = metrics['macro'][f'f{beta}']
+        wandb.run.summary[f"{stance}_{text_type}_favor_f1"] = metrics['favor']['f1']
+        wandb.run.summary[f"{stance}_{text_type}_against_f1"] = metrics['against']['f1']
+        wandb.run.summary[f"{stance}_{text_type}_neutral_f1"] = metrics['neutral']['f1']
+        wandb.run.summary[f"{stance}_{text_type}_favor_precision"] = metrics['favor']['precision']
+        wandb.run.summary[f"{stance}_{text_type}_against_precision"] = metrics['against']['precision']
+        wandb.run.summary[f"{stance}_{text_type}_neutral_precision"] = metrics['neutral']['precision']
+        wandb.run.summary[f"{stance}_{text_type}_favor_recall"] = metrics['favor']['recall']
+        wandb.run.summary[f"{stance}_{text_type}_against_recall"] = metrics['against']['recall']
+        wandb.run.summary[f"{stance}_{text_type}_neutral_recall"] = metrics['neutral']['recall']
+        wandb.run.summary[f"{stance}_{text_type}_favor_f{beta}"] = metrics['favor'][f'f{beta}']
+        wandb.run.summary[f"{stance}_{text_type}_against_f{beta}"] = metrics['against'][f'f{beta}']
+        wandb.run.summary[f"{stance}_{text_type}_neutral_f{beta}"] = metrics['neutral'][f'f{beta}']
+        
 
     f1s.append(f1)
     precisions.append(precision)
@@ -86,9 +105,9 @@ def main():
         all_topic_stances = json.load(f)
 
     use_baseline = False
-    train_num = 10
-    val_num = 10
-    dataset_strategy = 'order'
+    train_num = 8
+    val_num = 8
+    dataset_strategy = 'ratio:112'
     tune_general = True
     if not use_baseline:
         model_name = 'berkeley-nest/Starling-LM-7B-alpha'
@@ -97,7 +116,7 @@ def main():
         prompting_method = 'predict'
         opinion_method = 'template'
         teleprompter = 'multitaskfinetune'
-        teleprompter_settings = {'num_epochs': 2}
+        teleprompter_settings = {}
         classifier = StanceClassifier(model_name=model_name, model_prompt_template=model_prompt_template, prompting_method=prompting_method, opinion_method=opinion_method, backend="dspy", teleprompter=teleprompter)
     else:
         baseline_type = 'annotator'

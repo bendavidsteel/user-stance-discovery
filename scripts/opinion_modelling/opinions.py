@@ -5,10 +5,10 @@ def sliding_window(opinion_sequences, mask_sequences, halflife):
     opinions = np.zeros((len(opinion_sequences), opinion_sequences[0].shape[1]))
     for user_idx in range(len(opinion_sequences)):
         opinion_sequence = opinion_sequences[user_idx]
-        mask_sequence = mask_sequences[user_idx]
+        mask_sequence = mask_sequences[user_idx].reshape(-1,1)
         num_points = opinion_sequence.shape[0]
         alpha = 1 - np.exp(-np.log(2) / halflife)
-        attention_vector = np.array([(1 - alpha) ** i for i in range(num_points)])
+        attention_vector = np.array([(1 - alpha) ** i for i in range(num_points)]).reshape(-1,1)
         opinion = np.sum(opinion_sequence * attention_vector * mask_sequence, axis=0) / np.sum(attention_vector * mask_sequence, axis=0)
         opinions[user_idx] = opinion
     return opinions
