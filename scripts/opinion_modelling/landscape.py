@@ -1,3 +1,4 @@
+import json
 import os
 
 import matplotlib.pyplot as plt
@@ -6,7 +7,9 @@ import pandas as pd
 import seaborn as sns
 from sklearn.neighbors import KernelDensity
 
-import opinion_datasets
+import opinion_datasets, estimate
+
+
 
 def get_gradient(x):
     x_grad = np.gradient(x)
@@ -44,14 +47,71 @@ def get_maxima(x):
     maxima = np.logical_and(grad_sgn_grad_x == -2, grad_sgn_grad_y == -2)
     return maxima
 
+def sum_gaussians(opinion_means, opinion_variances, i, num_bins):
+    # Create a linspace array which will be reused
+    linspace_array = np.linspace(-1, 1, num_bins)
+
+    # Identify valid indices where none of the values are NaN
+    valid_indices = ~np.isnan(opinion_means[:, i]) & ~np.isnan(opinion_variances[:, i]) & (opinion_variances[:, i] > 0)
+
+    # Extract the valid means and variances
+    valid_means = opinion_means[valid_indices, i]
+    valid_variances = opinion_variances[valid_indices, i]
+
+    # Calculate the probability densities for the valid pairs
+    first_term = 1 / (valid_variances * np.sqrt(2 * np.pi)) * np.exp(-(linspace_array[:, None] - valid_means) ** 2 / (2 * valid_variances))
+    prob_density = np.sum(first_term, axis=1)
+
+    # add point masses
+    valid_indices = ~np.isnan(opinion_means[:, i]) & ~np.isnan(opinion_variances[:, i]) & (opinion_variances[:, i] == 0)
+    valid_means = opinion_means[valid_indices, i]
+    for mean in valid_means:
+        prob_density[np.argmin(np.abs(linspace_array - mean))] += 1
+
+    prob_density /= np.sum(prob_density)
+    return prob_density
+
+def sum_multi_gaussians(opinion_means, opinion_variances, i, j, num_bins):
+    # Create a linspace array which will be reused
+    linspace_array = np.linspace(-1, 1, num_bins)
+
+    # Identify valid indices where none of the values are NaN
+    valid_indices = ~np.isnan(opinion_means[:, j]) & ~np.isnan(opinion_variances[:, j]) & ~np.isnan(opinion_means[:, i]) & ~np.isnan(opinion_variances[:, i]) & (opinion_variances[:, j] > 0) & (opinion_variances[:, i] > 0)
+
+    # Extract the valid means and variances
+    valid_means1 = opinion_means[valid_indices, i]
+    valid_variances1 = opinion_variances[valid_indices, i]
+    valid_means2 = opinion_means[valid_indices, j]
+    valid_variances2 = opinion_variances[valid_indices, j]
+
+    # Calculate the probability densities for the valid pairs
+    first_term = 1 / (valid_variances1 * np.sqrt(2 * np.pi)) * np.exp(-(linspace_array[:, None] - valid_means1) ** 2 / (2 * valid_variances1))
+    second_terms = 1 / (valid_variances2 * np.sqrt(2 * np.pi)) * np.exp(-(linspace_array[:, None] - valid_means2) ** 2 / (2 * valid_variances2))
+
+    # Sum over the second dimension to get the total probability density
+    first_term = np.sum(first_term, axis=1)
+    second_terms = np.sum(second_terms, axis=1)
+    prob_density = first_term[:, None] * second_terms[None, :]
+
+    # add point masses
+    valid_indices = ~np.isnan(opinion_means[:, j]) & ~np.isnan(opinion_variances[:, j]) & ~np.isnan(opinion_means[:, i]) & ~np.isnan(opinion_variances[:, i]) & (opinion_variances[:, j] == 0) & (opinion_variances[:, i] == 0)
+    valid_means1 = opinion_means[valid_indices, i]
+    valid_means2 = opinion_means[valid_indices, j]
+    for mean1, mean2 in zip(valid_means1, valid_means2):
+        prob_density[np.argmin(np.abs(linspace_array - mean1)), np.argmin(np.abs(linspace_array - mean2))] += 1
+
+    prob_density /= np.sum(prob_density)
+    return prob_density
+
 def main():
     this_dir_path = os.path.dirname(os.path.realpath(__file__))
     root_dir_path = os.path.join(this_dir_path, "..", "..")
 
     dataset_name = "reddit"
+    aggregation = "weighted_mean"
 
     if dataset_name == "reddit":
-        dataset = opinion_datasets.RedditOpinionTimelineDataset()
+        dataset = opinion_datasets.RedditOpinionTimelineDataset(aggregation=aggregation)
     elif dataset_name == "generative":
         num_people = 10
         max_time_step = 10
@@ -62,11 +122,8 @@ def main():
     max_time_step = dataset.max_time_step
 
     all_opinions = []
-    for i in range(max_time_step):
-        opinions, users = dataset[i]
-        all_opinions.extend(opinions)
-
-    all_opinions = np.array(all_opinions)
+    all_users = []
+    opinion_means, opinion_variances, users = dataset[max_time_step] 
 
     if False:
         grid_size = 10
@@ -130,11 +187,61 @@ def main():
                 nearest_attractor = None
                 user_attractors[user_id] = nearest_attractor
 
-    user_opinion_df = pd.DataFrame(all_opinions, columns=dataset.stance_columns)
-    g = sns.pairplot(user_opinion_df, diag_kind = "hist", diag_kws = {'bins':25})
+    
+    num_bins = 25
+    # plot pairplot from opinion means and variances
+    user_opinion_df = pd.DataFrame(opinion_means, columns=dataset.stance_columns)
+    user_opinion_df["user"] = users
+    g = sns.pairplot(user_opinion_df, diag_kind = "hist", diag_kws = {'bins':num_bins})
     g.savefig(os.path.join(root_dir_path, "figs", "opinion_pairplot.png"))
 
-    
+    fig, axes = plt.subplots(nrows=len(dataset.stance_columns), ncols=len(dataset.stance_columns), figsize=(20, 20))
+    for i, stance1 in enumerate(dataset.stance_columns):
+        for j, stance2 in enumerate(dataset.stance_columns):
+            if i == j:
+                prob_density = sum_gaussians(opinion_means, opinion_variances, i, num_bins)
+                axes[i,j].plot(np.linspace(-1, 1, num_bins), prob_density)
+                axes[i,j].set_xlabel(stance1)
+                axes[i,j].set_ylabel("Probability Density")
+            else:
+                prob_density = sum_multi_gaussians(opinion_means, opinion_variances, i, j, num_bins)
+                axes[i,j].imshow(prob_density, extent=[-1,1,-1,1], origin='lower', cmap='viridis')
+                axes[i,j].set_xlabel(stance1)
+                axes[i,j].set_ylabel(stance2)
+    fig.savefig(os.path.join(root_dir_path, "figs", "opinion_distribution_pairplot.png"))
+
+
+    get_examples = True
+    if get_examples:
+        # get examples of moderate and extreme users for each opinion
+        for stance in dataset.stance_columns:
+            extreme_favor_user = user_opinion_df.sort_values(by=stance, ascending=False).head(1).iloc[0]
+            extreme_against_user = user_opinion_df.sort_values(by=stance, ascending=True).head(1).iloc[0]
+            # get user with stance closest to 0
+            moderate_user = user_opinion_df.iloc[user_opinion_df[stance].abs().argsort()[0]]
+
+            def print_comments(comment_df, stance):
+                comment_df = comment_df[comment_df[stance].notna()]
+                comment_df = comment_df.sample(3) if len(comment_df) > 3 else comment_df
+                for idx, row in comment_df.iterrows():
+                    d = {
+                        "stance": row[stance],
+                        "comment": row["comment"]
+                    }
+                    print(json.dumps(d, indent=4))
+
+            print(f"Stance: {stance}")
+            extreme_favor_comment_df = dataset.get_user_comments(extreme_favor_user['user'])
+            print(f"Extreme Favor User: {extreme_favor_comment_df.iloc[0]['user_id']}, Score: {extreme_favor_user[stance]}")
+            print_comments(extreme_favor_comment_df, stance)
+
+            extreme_against_comment_df = dataset.get_user_comments(extreme_against_user['user'])
+            print(f"Extreme Against User: {extreme_against_comment_df.iloc[0]['user_id']}, Score: {extreme_against_user[stance]}")
+            print_comments(extreme_against_comment_df, stance)
+
+            moderate_comment_df = dataset.get_user_comments(moderate_user['user'])
+            print(f"Moderate User: {moderate_comment_df.iloc[0]['user_id']}, Score: {moderate_user[stance]}")
+            print_comments(moderate_comment_df, stance)
 
 if __name__ == '__main__':
     main()

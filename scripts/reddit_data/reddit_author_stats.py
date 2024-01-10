@@ -81,12 +81,13 @@ def main():
 
     # save authors who have at least 1000 comments on topics of interest
     # and have been active for at least 100 days
-    users_df = users_df[users_df['num_comments_on_topics'] >= 1000]
-    users_df = users_df[users_df['posting_duration'] >= 100]
+    users_df = users_df[users_df['num_comments_on_topics'] >= 100]
+    users_df = users_df[users_df['posting_duration'] >= 10]
 
     print(f"Number of users: {len(users_df)}")
 
-    users_df.to_parquet(os.path.join(root_dir_path, 'data', 'reddit', '1sub_1year', 'topics_minilm_0_2', 'active_users.parquet.gzip'), compression='gzip', index=False)
+    active_users_path = os.path.join(root_dir_path, 'data', 'reddit', '1sub_1year', 'topics_minilm_0_2', 'more_active_users.parquet.gzip')
+    users_df.to_parquet(active_users_path, compression='gzip', index=False)
 
 if __name__ == '__main__':
     main()

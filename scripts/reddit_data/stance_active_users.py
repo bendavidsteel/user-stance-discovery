@@ -49,21 +49,27 @@ def eval_stance_detection(stance, dataset, classifier, batch_size, train_num, va
 
     return all_metrics
 
-def do_stance_detection(stance, stance_slug, topics, topic_path, topic_comments, comments_df, batch_size, stance_focus, chosen_metric):
-    best_metrics = None
+def do_stance_detection(stance, stance_slug, topic_path, topic_comments, topic_comments_df, batch_size, stance_focus, chosen_metric):
+    output_file_name = f'predicted_{len(topic_comments_df)}_comments.parquet.zstd'
+    
+    previous_best_metrics = None
+    previous_best_metric = 0
     for dir_name in os.listdir(os.path.join(topic_path, stance_slug)):
-        with open(os.path.join(topic_path, stance_slug, dir_name, 'metrics.json'), 'r') as f:
-            metrics = json.load(f)
-        if chosen_metric not in metrics[stance_focus]:
-            continue
-        if best_metrics is None or metrics[stance_focus][chosen_metric] > best_metrics[stance_focus][chosen_metric]:
-            best_metrics = metrics
+        # we only want to consider runs that have been evaluated on the same set of comments
+        if os.path.exists(os.path.join(topic_path, stance_slug, dir_name, output_file_name)):
+            with open(os.path.join(topic_path, stance_slug, dir_name, 'metrics.json'), 'r') as f:
+                metrics = json.load(f)
+            if chosen_metric not in metrics[stance_focus]:
+                continue
+            if previous_best_metrics is None or metrics[stance_focus][chosen_metric] > previous_best_metric:
+                previous_best_metrics = metrics
+                previous_best_metric = metrics[stance_focus][chosen_metric]
 
     api = wandb.Api(overrides={"project": "reddit-stance-prompting"})
     runs = api.runs(filters={"State": "finished"})
 
-    best_run = None
-    best_run_metric = 0
+    best_eval_run = None
+    best_eval_run_metric = 0
     for run in runs:
         if f"{stance}_comment_{stance_focus}_precision" not in run.summary or run.summary[f"{stance}_comment_{stance_focus}_precision"] <= 0.5:
             continue
@@ -74,22 +80,28 @@ def do_stance_detection(stance, stance_slug, topics, topic_path, topic_comments,
         if "tune" in run.config['teleprompter'] and "all_tasks_checkpoint_name" not in run.config:
             continue
         fbeta = run.summary[f'{stance}_comment_{stance_focus}_{chosen_metric}']
-        if best_run is None or fbeta > best_run_metric:
-            best_run = run
-            best_run_metric = fbeta
+        if best_eval_run is None or fbeta > best_eval_run_metric:
+            best_eval_run = run
+            best_eval_run_metric = fbeta
 
-    if best_run is None or (best_metrics is not None and chosen_metric in best_metrics[stance_focus] and best_run_metric <= best_metrics[stance_focus][chosen_metric]):
-        return
+    # TODO TO UNCOMMENT
+    # if best_eval_run is None or \
+    #     (   
+    #         previous_best_metrics is not None and \
+    #         chosen_metric in previous_best_metrics[stance_focus] and \
+    #         round(best_eval_run_metric, 4) <= round(previous_best_metric, 4) # round to avoid floating point errors
+    #     ):
+    #     return
 
-    train_num = best_run.config['train_num']
-    val_num = best_run.config['val_num']
-    model_name = best_run.config['model_name']
-    model_prompt_template = best_run.config['model_prompt_template'] if 'model_prompt_template' in best_run.config else "{prompt}"
-    prompting_method = best_run.config['prompt_method']
-    opinion_method = "onestep" if "target issue" in best_run.config["comment_prompt"] else "template"
-    teleprompter = best_run.config['teleprompter'] if 'teleprompter' in best_run.config else ""
-    tune_general = "tune_general" in best_run.config and best_run.config['tune_general']
-    dataset_strategy = best_run.config['dataset_strategy'] if 'dataset_strategy' in best_run.config else "order"
+    train_num = best_eval_run.config['train_num']
+    val_num = best_eval_run.config['val_num']
+    model_name = best_eval_run.config['model_name']
+    model_prompt_template = best_eval_run.config['model_prompt_template'] if 'model_prompt_template' in best_eval_run.config else "{prompt}"
+    prompting_method = best_eval_run.config['prompt_method']
+    opinion_method = "onestep" if "target issue" in best_eval_run.config["comment_prompt"] else "template"
+    teleprompter = best_eval_run.config['teleprompter'] if 'teleprompter' in best_eval_run.config else ""
+    tune_general = "tune_general" in best_eval_run.config and best_eval_run.config['tune_general']
+    dataset_strategy = best_eval_run.config['dataset_strategy'] if 'dataset_strategy' in best_eval_run.config else "order"
 
     stance_dataset = get_stance_dataset(stance, stance_slug, topic_comments, ['body', 'body_parent', 'post_all_text'], train_num, val_num, dataset_strategy)
     
@@ -102,7 +114,7 @@ def do_stance_detection(stance, stance_slug, topics, topic_path, topic_comments,
         else:
             task = "all_tasks"
         # check for saved model checkpoint
-        checkpoint_name = best_run.config[f'{task}_checkpoint_name']
+        checkpoint_name = best_eval_run.config[f'{task}_checkpoint_name']
         checkpoint_path = os.path.join(".", "model_checkpoints", checkpoint_name)
         if os.path.exists(checkpoint_path):
             classifier.load_model(model_name, checkpoint_path, stance_dataset.get_train_data())
@@ -113,27 +125,38 @@ def do_stance_detection(stance, stance_slug, topics, topic_path, topic_comments,
         stance, stance_dataset, classifier, batch_size, train_num, val_num, tune_general
     )
 
+    # TODO TO REMOVE
+    result_id = best_eval_run.id
+    result_dir_path = os.path.join(topic_path, stance_slug, result_id)
+    if not os.path.exists(result_dir_path):
+        os.mkdir(result_dir_path)
+
+    with open(os.path.join(result_dir_path, 'metrics.json'), 'w') as f:
+        json.dump(this_metrics, f, indent=2)
+
     if this_metrics[stance_focus]['precision'] > 0.5:
+        # evaluate against previous runs again post validation
         best_so_far = True
         for dir_name in os.listdir(os.path.join(topic_path, stance_slug)):
-            with open(os.path.join(topic_path, stance_slug, dir_name, 'metrics.json'), 'r') as f:
-                metrics = json.load(f)
+            if os.path.exists(os.path.join(topic_path, stance_slug, dir_name, output_file_name)):
+                with open(os.path.join(topic_path, stance_slug, dir_name, 'metrics.json'), 'r') as f:
+                    metrics = json.load(f)
 
-            if chosen_metric not in metrics[stance_focus]:
-                continue
+                if chosen_metric not in metrics[stance_focus]:
+                    continue
 
-            fbeta = metrics[stance_focus][chosen_metric]
-            this_fbeta = this_metrics[stance_focus][chosen_metric]
-            if this_fbeta < fbeta:
-                best_so_far = False
-                break
+                fbeta = metrics[stance_focus][chosen_metric]
+                this_fbeta = this_metrics[stance_focus][chosen_metric]
+                # round to avoid floating point errors
+                if round(this_fbeta, 4) <= round(fbeta, 4):
+                    best_so_far = False
+                    break
         
         if not best_so_far:
             return
 
-        topic_comments_df = comments_df.filter(pl.col('topic').is_in(topics))
-
         cols = ['body', 'body_parent', 'post_all_text']
+        topic_comments_df = topic_comments_df.clone()
         inputs = topic_comments_df.select(pl.concat_list(pl.col(cols))).to_series(0).to_list()
 
         dataset = StanceDataset(inputs, stance, train_num=0, val_num=0)
@@ -148,10 +171,14 @@ def do_stance_detection(stance, stance_slug, topics, topic_path, topic_comments,
             pl.Series(name='stance', values=stances)
         ])
 
-        result_id = best_run.id
+        result_id = best_eval_run.id
         result_dir_path = os.path.join(topic_path, stance_slug, result_id)
-        os.mkdir(result_dir_path)
-        topic_comments_df.write_parquet(os.path.join(result_dir_path, f'predicted_{len(stances)}_comments.parquet.zstd'))
+
+        if not os.path.exists(result_dir_path):
+            os.mkdir(result_dir_path)
+
+        topic_comments_df.write_parquet(os.path.join(result_dir_path, output_file_name))
+        
         with open(os.path.join(result_dir_path, 'metrics.json'), 'w') as f:
             json.dump(this_metrics, f, indent=2)
 
@@ -217,9 +244,11 @@ def main():
             if not os.path.exists(os.path.join(topic_path, stance_slug)):
                 os.mkdir(os.path.join(topic_path, stance_slug))
 
+            topic_comments_df = comments_df.filter(pl.col('topic').is_in(topics))
+
             chosen_metric = 'f0.5'
             for stance_focus in ['favor', 'against', 'neutral']:
-                do_stance_detection(stance, stance_slug, topics, topic_path, topic_comments, comments_df, batch_size, stance_focus, chosen_metric)
+                do_stance_detection(stance, stance_slug, topic_path, topic_comments, topic_comments_df, batch_size, stance_focus, chosen_metric)
 
 
 if __name__ == '__main__':

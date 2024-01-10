@@ -105,9 +105,9 @@ def main():
         all_topic_stances = json.load(f)
 
     use_baseline = False
-    train_num = 8
-    val_num = 8
-    dataset_strategy = 'ratio:112'
+    train_num = 10
+    val_num = 10
+    dataset_strategy = 'order'
     tune_general = True
     if not use_baseline:
         model_name = 'berkeley-nest/Starling-LM-7B-alpha'

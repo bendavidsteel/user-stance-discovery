@@ -572,8 +572,8 @@ class StanceClassifier:
                 teleprompter = tuning.FineTune()
                 args = (StanceModule(),)
                 default_teleprompter_settings = {'method': 'ia3', 'gradient_accumulation_steps': 1}
-                default_teleprompter_settings['lr'] = 1e-3
-                default_teleprompter_settings['num_epochs'] = 30 if all_tasks else 10
+                default_teleprompter_settings['lr'] = 1e-3 if all_tasks else 5e-4
+                default_teleprompter_settings['num_epochs'] = 50 if all_tasks else 10
                 for k, v in default_teleprompter_settings.items():
                     if k not in teleprompter_settings:
                         teleprompter_settings[k] = v
@@ -790,6 +790,16 @@ def get_stance_f1_score(gold_stances, stances, return_all=False, beta=0.5):
     num_n_fp = 0
     num_n_fn = 0
 
+    num_tf_pf = 0
+    num_tf_pn = 0
+    num_tf_pa = 0
+    num_tn_pf = 0
+    num_tn_pn = 0
+    num_tn_pa = 0
+    num_ta_pf = 0
+    num_ta_pn = 0
+    num_ta_pa = 0
+
     for gold_stance, stance in zip(gold_stances, stances):
         assert stance in ['favor', 'against', 'neutral']
         assert gold_stance in ['favor', 'against', 'neutral']
@@ -811,6 +821,25 @@ def get_stance_f1_score(gold_stances, stances, return_all=False, beta=0.5):
             num_n_fp += 1
         if stance != 'neutral' and gold_stance == 'neutral':
             num_n_fn += 1
+
+        if stance == 'favor' and gold_stance == 'favor':
+            num_tf_pf += 1
+        elif stance == 'neutral' and gold_stance == 'favor':
+            num_tf_pn += 1
+        elif stance == 'against' and gold_stance == 'favor':
+            num_tf_pa += 1
+        elif stance == 'favor' and gold_stance == 'neutral':
+            num_tn_pf += 1
+        elif stance == 'neutral' and gold_stance == 'neutral':
+            num_tn_pn += 1
+        elif stance == 'against' and gold_stance == 'neutral':
+            num_tn_pa += 1
+        elif stance == 'favor' and gold_stance == 'against':
+            num_ta_pf += 1
+        elif stance == 'neutral' and gold_stance == 'against':
+            num_ta_pn += 1
+        elif stance == 'against' and gold_stance == 'against':
+            num_ta_pa += 1
 
     # calculate total F1 score as average of F1 scores for each stance
     # calculate f1 score for favor
@@ -880,7 +909,22 @@ def get_stance_f1_score(gold_stances, stances, return_all=False, beta=0.5):
                 'f1': f1,
                 f'f{beta}': fbeta
             },
-            'test_num': len(gold_stances)
+            'test_num': len(gold_stances),
+            'true_favor': {
+                'predicted_favor': num_tf_pf,
+                'predicted_neutral': num_tf_pn,
+                'predicted_against': num_tf_pa
+            },
+            'true_neutral': {
+                'predicted_favor': num_tn_pf,
+                'predicted_neutral': num_tn_pn,
+                'predicted_against': num_tn_pa
+            },
+            'true_against': {
+                'predicted_favor': num_ta_pf,
+                'predicted_neutral': num_ta_pn,
+                'predicted_against': num_ta_pa
+            }
         }
     else:
         return precision, recall, f1, fbeta

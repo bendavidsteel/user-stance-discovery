@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -162,25 +163,30 @@ class RedditInteractionDataset(SocialInteractionDataset):
 
 
 class OpinionTimelineDataset:
-    def __init__(self, comment_df, stance_columns, aggregation="mean", halflife=50.):
+    def __init__(self, comment_df, stance_columns, all_classifier_profiles, aggregation=None, halflife=50.):
         assert 'createtime' in comment_df.columns, "createtime column not found"
         assert 'user_id' in comment_df.columns, "user_id column not found"
         assert 'comment_id' in comment_df.columns, "comment_id column not found"
+        assert 'comment' in comment_df.columns, "comment column not found"
+        assert 'classifier_idx' in comment_df.columns, "classifier_idx column not found"
         self.comment_df = comment_df
         self.num_opinions = len(stance_columns)
         self.stance_columns = stance_columns
+        self.all_classifier_profiles = all_classifier_profiles
         self.num_people = len(self.comment_df['user_id'].unique())
-        self.max_time_step = self.comment_df['createtime'].max()
+        self.aggregation = aggregation
+        if self.aggregation == "sliding_exp":
+            self.max_time_step = self.comment_df['createtime'].max()
+        elif self.aggregation == "mean":
+            self.max_time_step = 1
+        else:
+            self.max_time_step = self.comment_df['createtime'].max()
 
-        assert aggregation in ["mean", "sliding_exp"]
         self.aggregation = aggregation
         self.halflife = halflife
 
     def __getitem__(self, time_idx):
-        if self.aggregation == "mean":
-            comment_df = self.comment_df
-        elif self.aggregation == "sliding_exp":
-            comment_df = self.comment_df[self.comment_df['createtime'] <= time_idx]
+        comment_df = self.comment_df[self.comment_df['createtime'] <= time_idx]
 
         if len(comment_df) == 0:
             return np.zeros((0, self.num_opinions)), np.zeros((0, self.num_opinions))
@@ -191,19 +197,74 @@ class OpinionTimelineDataset:
 
         opinion_sequences = np.zeros((len(users), max_content, self.num_opinions))
         sequence_mask = np.zeros((len(users), max_content))
+        classifier_indices = np.zeros((len(users), max_content), dtype=np.int64)
 
         for i, (user_id, user_comments) in enumerate(user_comments_df):
             user_comments = user_comments.sort_values('createtime')
             user_opinions = user_comments[self.stance_columns].values
             opinion_sequences[i, :len(user_opinions), :] = user_opinions
             sequence_mask[i, :len(user_opinions)] = 1
+            classifier_indices[i, :len(user_opinions)] = user_comments['classifier_idx'].values
 
         if self.aggregation == "mean":
-            opinion_snapshots = np.mean(opinion_sequences, axis=1)
+            opinion_snapshots = np.nanmean(opinion_sequences, axis=1)
+            return opinion_snapshots, users
+        elif self.aggregation == "weighted_mean":
+            opinion_means, opinion_variances = self._weighted_statistics(opinion_sequences, sequence_mask, classifier_indices)
+            return opinion_means, opinion_variances, users
         elif self.aggregation == "sliding_exp":
+            raise NotImplementedError("TODO: Account for nans in data")
             opinion_snapshots = opinions.sliding_window(opinion_sequences, sequence_mask, halflife=self.halflife)
+            return opinion_snapshots, users
+        else:
+            return opinion_sequences, sequence_mask, users, classifier_indices
 
-        return opinion_snapshots, users
+    def get_user_comments(self, user_id):
+        return self.comment_df[self.comment_df['user_id'] == user_id]
+    
+    def _weighted_statistics(self, opinion_sequences, mask_sequence, classifier_indices):
+        stances = [col.replace('stance_', '') for col in self.stance_columns]
+        precisions = np.zeros((len(stances), max([len(self.all_classifier_profiles[stance]) for stance in stances]), 3))
+        precisions = np.nan * precisions
+        for stance_idx, stance in enumerate(stances):
+            for predictor_idx, predictor_id in enumerate(self.all_classifier_profiles[stance]):
+                profile = self.all_classifier_profiles[stance][predictor_id]
+                precisions[stance_idx, predictor_idx, 0] = profile['against']['precision']
+                precisions[stance_idx, predictor_idx, 1] = profile['neutral']['precision']
+                precisions[stance_idx, predictor_idx, 2] = profile['favor']['precision']
+
+        weights = np.full(opinion_sequences.shape, np.nan)
+        for stance_idx, stance in enumerate(stances):
+            for user_idx in range(opinion_sequences.shape[0]):
+                # Identify valid comments for the current user and stance
+                valid_comments = (mask_sequence[user_idx, :] != 0) & (~np.isnan(opinion_sequences[user_idx, :, stance_idx]))
+
+                # Get the predictor IDs for the current user across all comments
+                predictor_ids = classifier_indices[user_idx, :]
+
+                # Get the predicted stances for valid comments and adjust for indexing
+                predicted_stances = opinion_sequences[user_idx, valid_comments, stance_idx].astype(int) + 1
+
+                # Calculate precision values for valid comments
+                precisions_values = precisions[stance_idx, predictor_ids[valid_comments], predicted_stances]
+
+                # Update weights for valid comments
+                weights[user_idx, valid_comments, stance_idx] = precisions_values
+
+
+        def nansum(x, **kwargs):
+            if np.isnan(x).all():
+                return np.nan
+            else:
+                return np.nansum(x, **kwargs)
+
+        weight_sum = nansum(weights, axis=1)
+
+        weighted_mean = np.divide(nansum(opinion_sequences * weights, axis=1), weight_sum, out=np.full(weight_sum.shape, np.nan), where=weight_sum != 0)
+        ex2 = np.divide(nansum(opinion_sequences ** 2 * weights, axis=1), weight_sum, out=np.full(weight_sum.shape, np.nan), where=weight_sum != 0)
+        n = nansum(np.isnan(opinion_sequences), axis=1)
+        weighted_variance = (ex2 - (weighted_mean ** 2)) * np.divide(n, n - 1, out=np.full(n.shape, np.nan), where=n > 1)
+        return weighted_mean, weighted_variance
 
 class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
     def __init__(self, num_people, max_time_step, num_opinions, **kwargs):
@@ -239,8 +300,107 @@ class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
         stance_columns = [f'stance_{i}' for i in range(num_opinions)]
         comments_df[stance_columns] = np.array([np.array(o) for o in comments_df['opinions']])
 
-        super().__init__(comments_df, stance_columns, **kwargs)
+        all_classifier_profiles = {}
+        for stance_idx in range(num_opinions):
+            all_classifier_profiles[stance_idx] = {}
+            all_classifier_profiles[stance_idx][0] = {
+                'true_favor': {
+                    'predicted_favor': 1,
+                    'predicted_against': 0,
+                    'predicted_neutral': 0,
+                },
+                'true_against': {
+                    'predicted_favor': 0,
+                    'predicted_against': 1,
+                    'predicted_neutral': 0,
+                },
+                'true_neutral': {
+                    'predicted_favor': 0,
+                    'predicted_against': 0,
+                    'predicted_neutral': 1,
+                },
+            }
 
+        super().__init__(comments_df, stance_columns, all_classifier_profiles, **kwargs)
+
+
+class SimpleGenerativeOpinionTimelineDataset(OpinionTimelineDataset):
+    def __init__(self, user_stance, user_stance_variance, num_data_points, prediction_precision=1.0, **kwargs):
+        num_opinions = 1
+        stance = 'stance_0'
+        user_id = 'user0'
+
+        comment_data = []
+        for i in range(num_data_points):
+            comment_stance = np.random.normal(user_stance, user_stance_variance)
+            comment_stance = np.clip(comment_stance, -1, 1)
+            quantized_comment_stance = 0
+            if comment_stance > 1/3:
+                quantized_comment_stance = 1
+            elif comment_stance < -1/3:
+                quantized_comment_stance = -1
+            comment_data.append({
+                'comment_id': f'comment{i}',
+                'post': f'post{i}',
+                'comment': f'comment{i}',
+                'createtime': i,
+                'user_id': user_id,
+                'post_id': f'post{i}',
+                'parent_comment_id': None,
+                stance: quantized_comment_stance,
+                'classifier_idx': 0,
+            })
+        comments_df = pd.DataFrame(comment_data)
+
+        stance_columns = [stance]
+
+        all_classifier_profiles = {}
+        all_classifier_profiles[stance] = {}
+        all_classifier_profiles[stance][0] = {
+            'true_favor': {
+                'predicted_favor': int(100 * prediction_precision),
+                'predicted_against': 0,
+                'predicted_neutral': int(100 * (1 - prediction_precision)) + int(100 * (1 - prediction_precision) / 2.),
+            },
+            'true_against': {
+                'predicted_favor': 0,
+                'predicted_against': int(100 * prediction_precision),
+                'predicted_neutral': int(100 * (1 - prediction_precision)) + int(100 * (1 - prediction_precision) / 2.),
+            },
+            'true_neutral': {
+                'predicted_favor': int(100 * (1 - prediction_precision)),
+                'predicted_against': int(100 * (1 - prediction_precision)),
+                'predicted_neutral': int(100 * prediction_precision),
+            },
+        }
+
+        super().__init__(comments_df, stance_columns, all_classifier_profiles, **kwargs)
+
+
+class EnsembleClassifier:
+    def __init__(self, metric_profiles):
+        self.metric_profiles = metric_profiles
+
+    def predict(self, data_row):
+
+        # TODO change to bayesian model averaging
+        # for now we assume that neutral is the most common stance
+        # and therefore anything except neutral should be prioritized if the classifier has a high precision for that label
+        best_stance = 'neutral'
+        highest_precision = 0
+        best_classifier_idx = None
+        for classifier_idx in self.metric_profiles:
+            classification = data_row[f'stance_{classifier_idx}']
+            metric_profile = self.metric_profiles[classifier_idx]
+            classifier_precision = metric_profile[classification]['precision']
+            if classifier_precision > highest_precision:
+                highest_precision = classifier_precision
+                best_classifier_idx = classifier_idx
+
+                if classification != 'neutral' and classifier_precision > 0.5:
+                    best_stance = classification
+
+        return best_stance, best_classifier_idx
 
 class RedditOpinionTimelineDataset(OpinionTimelineDataset):
     def __init__(self, **kwargs):
@@ -252,6 +412,7 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
             topics_stances = json.load(f)
 
         comments_df = None
+        all_metric_profiles = {}
         for topic_stances in topics_stances['topic_stances']:
             topic_path = os.path.join(topics_dir_path, f"topic_{topic_stances['topics'][0]}")
             for stance in topic_stances['stances']:
@@ -260,62 +421,100 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
 
                 if not os.path.exists(stance_path):
                     continue
-
-                best_macro_fbeta = 0
-                beta = 0.5
-                best_dir_name = None
-                for dir_name in os.listdir(stance_path):
-                    metrics_path = os.path.join(stance_path, dir_name, "metrics.json")
-                    with open(metrics_path, "r") as f:
-                        metrics = json.load(f)
-                    fbeta = (1 + beta**2) * metrics['macro']['precision'] * metrics['macro']['recall'] / (beta**2 * metrics['macro']['precision'] + metrics['macro']['recall'])
-                    if fbeta > best_macro_fbeta and metrics['macro']['precision'] > 0.5:
-                        best_macro_fbeta = fbeta
-                        best_dir_name = dir_name
                 
-                if best_dir_name is None:
-                    continue
+                stance_comments_df = None
 
-                stance_path = os.path.join(stance_path, best_dir_name)
-                stance_comments_df = pl.read_parquet(
-                    os.path.join(stance_path, "predicted_comments.parquet.zstd"), 
-                    columns=['author', 'id', 'created_utc', 'body', 'body_parent', 'post_all_text', 'stance']
-                )
-                
-                # rename stance column to stance_{stance}
-                stance_comments_df = stance_comments_df.rename(
-                    {f"stance": f"stance_{stance_slug}"}
-                )
+                metric_profiles = {}
+                for idx, stance_focus in enumerate(['favor', 'against', 'neutral']):
+                    best_metric = 0
+                    best_metrics = None
+                    best_dir_name = None
+                    for dir_name in os.listdir(stance_path):
+                        metrics_path = os.path.join(stance_path, dir_name, "metrics.json")
+                        with open(metrics_path, "r") as f:
+                            metrics = json.load(f)
+                        metric = metrics[stance_focus]['f0.5']
+                        if metric > best_metric and metrics[stance_focus]['precision'] > 0.5:
+                            best_metric = metric
+                            best_metrics = metrics
+                            best_dir_name = dir_name
+                    
+                    if best_dir_name is None:
+                        continue
+
+                    pred_path = os.path.join(stance_path, best_dir_name)
+                    # get smallest stance predictions
+                    num_comments = None
+                    file_name = None
+                    for stance_preds_file in os.listdir(pred_path):
+                        if stance_preds_file.endswith('comments.parquet.zstd'):
+                            this_num_comments = re.search(r'\d+', stance_preds_file).group()
+                            if num_comments is None or this_num_comments < num_comments:
+                                num_comments = this_num_comments
+                                file_name = stance_preds_file
+
+                    if file_name is None or not os.path.exists(os.path.join(pred_path, file_name)):
+                        continue
+
+                    focus_stance_comments_df = pl.read_parquet(
+                        os.path.join(pred_path, file_name), 
+                        columns=['author', 'id', 'created_utc', 'body', 'body_parent', 'post_all_text', 'stance']
+                    )
+                    
+                    # rename stance column to stance_{stance}
+                    focus_stance_comments_df = focus_stance_comments_df.rename(
+                        {
+                            f"stance": f"stance_{idx}",
+                            "author": "user_id",
+                            "id": "comment_id",
+                            "created_utc": "createtime",
+                            "body": "comment",
+                            "body_parent": "parent_comment",
+                            "post_all_text": "post",
+                        }
+                    )
+
+                    metric_profiles[idx] = best_metrics
+
+                    if stance_comments_df is None:
+                        stance_comments_df = focus_stance_comments_df
+                    else:
+                        stance_comments_df = stance_comments_df.join(focus_stance_comments_df.select(['comment_id', f'stance_{idx}']), on='comment_id', how='inner')
+
+                # find best stance prediction for each comment based on metrics for each predictor
+                # use a weighted voting method
+                stance_comments_df = stance_comments_df.to_pandas()
+                weighted_voting_classifier = EnsembleClassifier(metric_profiles)
+                stance_comments_df[[f'stance_{stance_slug}', 'classifier_idx']] = stance_comments_df.apply(weighted_voting_classifier.predict, axis=1, result_type='expand')
+                stance_comments_df = pl.from_pandas(stance_comments_df.drop([f'stance_{idx}' for idx in metric_profiles], axis=1))
 
                 if comments_df is None:
                     comments_df = stance_comments_df
                 else:
                     comments_df = pl.concat([comments_df, stance_comments_df], how='diagonal')    
 
-        stance_columns = [col for col in comments_df.columns if "stance" in col]
+                all_metric_profiles[stance_slug] = metric_profiles
 
-        comments_df = comments_df.rename(
-            {
-                "author": "user_id",
-                "id": "comment_id",
-                "created_utc": "createtime",
-                "body": "comment",
-                "body_parent": "parent_comment",
-                "post_all_text": "post",
-            }
-        )
+        stance_columns = [col for col in comments_df.columns if "stance" in col]
 
         comments_df = comments_df.to_pandas()
 
         # map neutral to 0, favor to 1, against to -1
         for stance_column in stance_columns:
-            comments_df[stance_column] = comments_df[stance_column].apply(lambda x: 1 if x == "favor" else (-1 if x == "against" else 0))
+            def map_stance(stance):
+                if stance == "neutral":
+                    return 0
+                elif stance == "favor":
+                    return 1
+                elif stance == "against":
+                    return -1
+                else:
+                    return None
+            comments_df[stance_column] = comments_df[stance_column].apply(map_stance)
 
         # round createtime to days, and rescale to start at 0
         comments_df['createtime'] = pd.to_datetime(comments_df['createtime'], unit='s')
         comments_df['createtime'] = comments_df['createtime'].dt.floor('d')
         comments_df['createtime'] = (comments_df['createtime'] - comments_df['createtime'].min()).dt.days
 
-        super().__init__(comments_df, stance_columns, **kwargs)
-
-    def 
+        super().__init__(comments_df, stance_columns, all_metric_profiles, **kwargs)
