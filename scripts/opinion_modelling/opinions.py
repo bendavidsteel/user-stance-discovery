@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-def sliding_window(opinion_sequences, mask_sequences, halflife):
+def weighted_exponential_smoothing(opinion_sequences, mask_sequences, halflife):
     opinions = np.zeros((len(opinion_sequences), opinion_sequences[0].shape[1]))
     for user_idx in range(len(opinion_sequences)):
         opinion_sequence = opinion_sequences[user_idx]

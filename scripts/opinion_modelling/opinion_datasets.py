@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import re
@@ -10,6 +11,13 @@ import tqdm
 
 import generative
 import opinions
+
+def nansum(x, **kwargs):
+    s = np.nansum(x, **kwargs)
+    all_nan_rows = np.isnan(x).all(**kwargs)
+    if all_nan_rows.any():
+        s[np.isnan(x).all(**kwargs)] = np.nan
+    return s
 
 class SocialInteractionDataset(torch.utils.data.Dataset):
     def __init__(self, user_df, posts_df, comments_df, post_opinions, comment_opinions, batch=True):
@@ -163,70 +171,137 @@ class RedditInteractionDataset(SocialInteractionDataset):
 
 
 class OpinionTimelineDataset:
-    def __init__(self, comment_df, stance_columns, all_classifier_profiles, aggregation=None, halflife=50.):
+    def __init__(self, comment_df, stance_columns, all_classifier_profiles, aggregation=None, halflife=50.0, min_num_per_stance=None):
+        assert len(comment_df) > 0, "comment_df must not be empty"
         assert 'createtime' in comment_df.columns, "createtime column not found"
         assert 'user_id' in comment_df.columns, "user_id column not found"
         assert 'comment_id' in comment_df.columns, "comment_id column not found"
         assert 'comment' in comment_df.columns, "comment column not found"
         assert 'classifier_idx' in comment_df.columns, "classifier_idx column not found"
+
+        if min_num_per_stance is not None:
+            # Create a mask for rows to keep
+            mask = pd.Series(True, index=comment_df.index)
+
+            # Iterate over each stance
+            for stance in stance_columns:
+                # Group by user_id and stance, and filter out groups with less than 10 comments
+                small_groups = comment_df[comment_df[stance].notna()].groupby('user_id').filter(lambda x: len(x) < min_num_per_stance).index
+
+                # Update the mask
+                mask.loc[small_groups] = False
+
+            # Drop the filtered rows from the DataFrame
+            comment_df = comment_df[mask]
+
         self.comment_df = comment_df
         self.num_opinions = len(stance_columns)
         self.stance_columns = stance_columns
         self.all_classifier_profiles = all_classifier_profiles
         self.num_people = len(self.comment_df['user_id'].unique())
         self.aggregation = aggregation
-        if self.aggregation == "sliding_exp":
-            self.max_time_step = self.comment_df['createtime'].max()
-        elif self.aggregation == "mean":
-            self.max_time_step = 1
-        else:
-            self.max_time_step = self.comment_df['createtime'].max()
+        self.min_time_step = self.comment_df['createtime'].min()
+        self.max_time_step = self.comment_df['createtime'].max()
+        self.users = self.comment_df['user_id'].unique()
 
         self.aggregation = aggregation
         self.halflife = halflife
 
-    def __getitem__(self, time_idx):
-        comment_df = self.comment_df[self.comment_df['createtime'] <= time_idx]
+    def get_data(self, start, end):
+        if (isinstance(start, int) or isinstance(start, float) or isinstance(start, datetime.datetime)) and (isinstance(end, int) or isinstance(end, float), isinstance(end, datetime.datetime)):
+            assert start != np.nan or end != np.nan, "start or end cannot be nan"
+            comment_df = self.comment_df[(self.comment_df['createtime'] <= end) & (self.comment_df['createtime'] >= start)]
 
-        if len(comment_df) == 0:
-            return np.zeros((0, self.num_opinions)), np.zeros((0, self.num_opinions))
+            if len(comment_df) == 0:
+                return np.zeros((0, self.num_opinions)), np.zeros((0, self.num_opinions))
 
-        user_comments_df = comment_df.groupby('user_id')
-        max_content = user_comments_df.count()['comment_id'].max()
-        users = user_comments_df.count().index.values
+            user_comments_df = comment_df.groupby('user_id')
+            max_content = user_comments_df.count()['comment_id'].max()
 
-        opinion_sequences = np.zeros((len(users), max_content, self.num_opinions))
-        sequence_mask = np.zeros((len(users), max_content))
-        classifier_indices = np.zeros((len(users), max_content), dtype=np.int64)
+            opinion_sequences = np.full((len(self.users), max_content, self.num_opinions), np.nan)
+            classifier_indices = np.zeros((len(self.users), max_content), dtype=np.int64)
 
-        for i, (user_id, user_comments) in enumerate(user_comments_df):
-            user_comments = user_comments.sort_values('createtime')
-            user_opinions = user_comments[self.stance_columns].values
-            opinion_sequences[i, :len(user_opinions), :] = user_opinions
-            sequence_mask[i, :len(user_opinions)] = 1
-            classifier_indices[i, :len(user_opinions)] = user_comments['classifier_idx'].values
+            for i, user_id in enumerate(self.users):
+                try:
+                    user_comments = user_comments_df.get_group(user_id)
+                except KeyError:
+                    continue
+                user_comments = user_comments.sort_values('createtime')
+                user_opinions = user_comments[self.stance_columns].values
+                opinion_sequences[i, :len(user_opinions), :] = user_opinions
+                classifier_indices[i, :len(user_opinions)] = user_comments['classifier_idx'].values
 
-        if self.aggregation == "mean":
-            opinion_snapshots = np.nanmean(opinion_sequences, axis=1)
-            return opinion_snapshots, users
-        elif self.aggregation == "weighted_mean":
-            opinion_means, opinion_variances = self._weighted_statistics(opinion_sequences, sequence_mask, classifier_indices)
-            return opinion_means, opinion_variances, users
-        elif self.aggregation == "sliding_exp":
-            raise NotImplementedError("TODO: Account for nans in data")
-            opinion_snapshots = opinions.sliding_window(opinion_sequences, sequence_mask, halflife=self.halflife)
-            return opinion_snapshots, users
+            if self.aggregation == "weighted_mean":
+                opinion_means, opinion_variances = self._weighted_mean_and_variance(opinion_sequences, classifier_indices)
+                return opinion_means, opinion_variances, self.users
+            elif self.aggregation == "weighted_exponential_smoothing":
+                days_past = np.full((len(self.users), max_content), np.nan)
+                for i, user_id in enumerate(self.users):
+                    try:
+                        user_comments = user_comments_df.get_group(user_id)
+                    except KeyError:
+                        continue
+                    user_comments = user_comments.sort_values('createtime')
+                    days_ago = end - user_comments['createtime'].values
+                    days_past[i, :len(days_ago)] = days_ago
+
+                opinion_means, opinion_variances = self._weighted_exponential_smoothing(opinion_sequences, days_past, classifier_indices)
+                return opinion_means, opinion_variances, self.users
+            else:
+                return opinion_sequences, self.users, classifier_indices
+            
+        elif hasattr(start, '__iter__') and hasattr(end, '__iter__'):
+            assert len(start) == len(end), "start and end must be the same length"
+            assert self.aggregation in ["weighted_mean", "weighted_exponential_smoothing"], "aggregation must be weighted_mean or weighted_exponential_smoothing"
+            users_comments = {user_id: user_comments.sort_values('createtime') for user_id, user_comments in self.comment_df.groupby('user_id')}
+            opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions))
+            opinion_timeline_var = np.zeros((len(end), len(self.users), self.num_opinions))
+            precision_weights = None
+
+            for idx in tqdm.tqdm(range(len(end))):
+                users_time_comments = {user_id: user_comments[(user_comments['createtime'] >= start[idx]) & (user_comments['createtime'] <= end[idx])] for user_id, user_comments in users_comments.items()}
+                max_content = max([len(user_comments) for user_comments in users_time_comments.values()])
+
+                opinion_sequences = np.full((len(self.users), max_content, self.num_opinions), np.nan, dtype=np.float16)
+                classifier_indices = np.zeros((len(self.users), max_content), dtype=np.int8)
+                for i, user_id in enumerate(self.users):
+                    user_time_comments = users_time_comments[user_id]
+                    user_opinions = user_time_comments[self.stance_columns].values
+                    opinion_sequences[i, :len(user_opinions), :] = user_opinions.astype(np.float16)
+                    classifier_indices[i, :len(user_opinions)] = user_time_comments['classifier_idx'].values.astype(np.int8)
+
+                precision_weights = self._get_prediction_weights(opinion_sequences, classifier_indices)
+                    
+                if self.aggregation == "weighted_exponential_smoothing":
+                    days_past = np.full((len(self.users), max_content), np.nan)
+                    for i, user_id in enumerate(self.users):
+                        user_time_comments = users_time_comments[user_id]
+                        if isinstance(end[idx], float) and user_time_comments['createtime'].dtype == np.float64:
+                            days_ago = np.ceil(end[idx]) - user_time_comments['createtime'].values
+                        elif isinstance(end[idx], datetime.datetime) and user_time_comments['createtime'].dtype == np.dtype('datetime64[ns]'):
+                            # convert to days
+                            days_ago = (pd.to_datetime(end[idx]) - pd.to_datetime(user_time_comments['createtime'])).dt.days.values
+                        days_past[i, :len(days_ago)] = days_ago
+
+                    exp_weights = self._get_exp_weights(opinion_sequences, days_past)
+                    weights = precision_weights[:, :exp_weights.shape[1], :] * exp_weights
+                else:
+                    weights = precision_weights
+                
+                opinion_means, opinion_variances = self._calc_weighted_mean_and_variance(opinion_sequences, weights)
+                opinion_timeline[idx] = opinion_means
+                opinion_timeline_var[idx] = opinion_variances
+            return opinion_timeline, opinion_timeline_var, self.users
         else:
-            return opinion_sequences, sequence_mask, users, classifier_indices
+            raise ValueError("Invalid args")
 
     def get_user_comments(self, user_id):
         return self.comment_df[self.comment_df['user_id'] == user_id]
     
-    def _weighted_statistics(self, opinion_sequences, mask_sequence, classifier_indices):
-        stances = [col.replace('stance_', '') for col in self.stance_columns]
-        precisions = np.zeros((len(stances), max([len(self.all_classifier_profiles[stance]) for stance in stances]), 3))
+    def _get_prediction_weights(self, opinion_sequences, classifier_indices):
+        precisions = np.zeros((len(self.stance_columns), max([len(self.all_classifier_profiles[stance]) for stance in self.stance_columns]), 3))
         precisions = np.nan * precisions
-        for stance_idx, stance in enumerate(stances):
+        for stance_idx, stance in enumerate(self.stance_columns):
             for predictor_idx, predictor_id in enumerate(self.all_classifier_profiles[stance]):
                 profile = self.all_classifier_profiles[stance][predictor_id]
                 precisions[stance_idx, predictor_idx, 0] = profile['against']['precision']
@@ -234,10 +309,10 @@ class OpinionTimelineDataset:
                 precisions[stance_idx, predictor_idx, 2] = profile['favor']['precision']
 
         weights = np.full(opinion_sequences.shape, np.nan)
-        for stance_idx, stance in enumerate(stances):
+        for stance_idx, stance in enumerate(self.stance_columns):
             for user_idx in range(opinion_sequences.shape[0]):
                 # Identify valid comments for the current user and stance
-                valid_comments = (mask_sequence[user_idx, :] != 0) & (~np.isnan(opinion_sequences[user_idx, :, stance_idx]))
+                valid_comments = ~np.isnan(opinion_sequences[user_idx, :, stance_idx])
 
                 # Get the predictor IDs for the current user across all comments
                 predictor_ids = classifier_indices[user_idx, :]
@@ -251,20 +326,51 @@ class OpinionTimelineDataset:
                 # Update weights for valid comments
                 weights[user_idx, valid_comments, stance_idx] = precisions_values
 
+        return weights
 
-        def nansum(x, **kwargs):
-            if np.isnan(x).all():
-                return np.nan
-            else:
-                return np.nansum(x, **kwargs)
+    def _weighted_mean_and_variance(self, opinion_sequences, classifier_indices):
+        weights = self._get_prediction_weights(opinion_sequences, classifier_indices)
 
+        return self._calc_weighted_mean_and_variance(opinion_sequences, weights)
+
+    def _calc_weighted_mean_and_variance(self, opinion_sequences, weights):
         weight_sum = nansum(weights, axis=1)
 
         weighted_mean = np.divide(nansum(opinion_sequences * weights, axis=1), weight_sum, out=np.full(weight_sum.shape, np.nan), where=weight_sum != 0)
         ex2 = np.divide(nansum(opinion_sequences ** 2 * weights, axis=1), weight_sum, out=np.full(weight_sum.shape, np.nan), where=weight_sum != 0)
-        n = nansum(np.isnan(opinion_sequences), axis=1)
+        n = nansum(~np.isnan(opinion_sequences), axis=1)
         weighted_variance = (ex2 - (weighted_mean ** 2)) * np.divide(n, n - 1, out=np.full(n.shape, np.nan), where=n > 1)
         return weighted_mean, weighted_variance
+    
+    def _get_exp_weights(self, opinion_sequences, days_past):
+        stances = [col.replace('stance_', '') for col in self.stance_columns]
+        exp_weights = np.full(opinion_sequences.shape, np.nan)
+        alpha = 1 - np.exp(-np.log(2) / self.halflife)
+
+        # Assuming alpha is defined
+        one_minus_alpha = 1 - alpha
+
+        for stance_idx, stance in enumerate(stances):
+            # Pre-compute a mask for valid comments for all users for this stance
+            valid_comments_mask = ~np.isnan(opinion_sequences[:, :, stance_idx])
+
+            # Iterate over users
+            for user_idx in range(opinion_sequences.shape[0]):
+                valid_comments_indices = np.where(valid_comments_mask[user_idx])[0]
+
+                if valid_comments_indices.size > 0:
+                    days_ago = days_past[user_idx, valid_comments_indices]
+                    exp_weights[user_idx, valid_comments_indices, stance_idx] = one_minus_alpha ** days_ago
+
+        return exp_weights
+
+    def _weighted_exponential_smoothing(self, opinion_sequences, days_past, classifier_indices):
+        precision_weights = self._get_prediction_weights(opinion_sequences, classifier_indices)
+        exp_weights = self._get_exp_weights(opinion_sequences, days_past)
+        
+        weights = precision_weights * exp_weights
+        return self._calc_weighted_mean_and_variance(opinion_sequences, weights)
+
 
 class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
     def __init__(self, num_people, max_time_step, num_opinions, **kwargs):
@@ -325,54 +431,119 @@ class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
 
 
 class SimpleGenerativeOpinionTimelineDataset(OpinionTimelineDataset):
-    def __init__(self, user_stance, user_stance_variance, num_data_points, prediction_precision=1.0, **kwargs):
+    def __init__(self, user_stance, user_stance_variance, num_data_points, pred_profile_type='perfect', **kwargs):
         num_opinions = 1
         stance = 'stance_0'
-        user_id = 'user0'
+        comment_id = 0
 
         comment_data = []
-        for i in range(num_data_points):
-            comment_stance = np.random.normal(user_stance, user_stance_variance)
-            comment_stance = np.clip(comment_stance, -1, 1)
-            quantized_comment_stance = 0
-            if comment_stance > 1/3:
-                quantized_comment_stance = 1
-            elif comment_stance < -1/3:
-                quantized_comment_stance = -1
-            comment_data.append({
-                'comment_id': f'comment{i}',
-                'post': f'post{i}',
-                'comment': f'comment{i}',
-                'createtime': i,
-                'user_id': user_id,
-                'post_id': f'post{i}',
-                'parent_comment_id': None,
-                stance: quantized_comment_stance,
-                'classifier_idx': 0,
-            })
+        for j in range(user_stance.shape[0] if isinstance(user_stance, np.ndarray) and user_stance.ndim > 1 else 1):
+            user_id = f"user{j}"
+            for i in range(num_data_points):
+                if isinstance(user_stance, float):
+                    comment_stance = np.random.normal(user_stance, user_stance_variance)
+                elif isinstance(user_stance, np.ndarray):
+                    if user_stance.ndim == 1:
+                        comment_stance = np.random.normal(user_stance[i], user_stance_variance)
+                    elif user_stance.ndim == 2:
+                        comment_stance = np.random.normal(user_stance[j, i], user_stance_variance)
+                comment_stance = np.clip(comment_stance, -1, 1)
+                quantized_comment_stance = 0
+                if comment_stance > 1/3:
+                    quantized_comment_stance = 1
+                elif comment_stance < -1/3:
+                    quantized_comment_stance = -1
+                comment_data.append({
+                    'comment_id': comment_id,
+                    'post': f'post{i}',
+                    'comment': f'comment{i}',
+                    'createtime': i,
+                    'user_id': user_id,
+                    'post_id': f'post{i}',
+                    'parent_comment_id': None,
+                    stance: quantized_comment_stance,
+                    'classifier_idx': 0,
+                })
+                comment_id += 1
         comments_df = pd.DataFrame(comment_data)
 
         stance_columns = [stance]
 
         all_classifier_profiles = {}
         all_classifier_profiles[stance] = {}
-        all_classifier_profiles[stance][0] = {
-            'true_favor': {
-                'predicted_favor': int(100 * prediction_precision),
-                'predicted_against': 0,
-                'predicted_neutral': int(100 * (1 - prediction_precision)) + int(100 * (1 - prediction_precision) / 2.),
-            },
-            'true_against': {
-                'predicted_favor': 0,
-                'predicted_against': int(100 * prediction_precision),
-                'predicted_neutral': int(100 * (1 - prediction_precision)) + int(100 * (1 - prediction_precision) / 2.),
-            },
-            'true_neutral': {
-                'predicted_favor': int(100 * (1 - prediction_precision)),
-                'predicted_against': int(100 * (1 - prediction_precision)),
-                'predicted_neutral': int(100 * prediction_precision),
-            },
-        }
+
+        if pred_profile_type == 'perfect':
+            profile = {
+                'true_favor': {
+                    'predicted_favor': 1,
+                    'predicted_against': 0,
+                    'predicted_neutral': 0,
+                },
+                'true_against': {
+                    'predicted_favor': 0,
+                    'predicted_against': 1,
+                    'predicted_neutral': 0,
+                },
+                'true_neutral': {
+                    'predicted_favor': 0,
+                    'predicted_against': 0,
+                    'predicted_neutral': 1,
+                },
+            }
+        elif pred_profile_type == 'low_precision':
+            profile = {
+                'true_favor': {
+                    'predicted_favor': 10,
+                    'predicted_against': 1,
+                    'predicted_neutral': 7,
+                },
+                'true_against': {
+                    'predicted_favor': 1,
+                    'predicted_against': 9,
+                    'predicted_neutral': 6,
+                },
+                'true_neutral': {
+                    'predicted_favor': 7,
+                    'predicted_against': 6,
+                    'predicted_neutral': 20,
+                },
+            }
+        elif pred_profile_type == 'low_recall':
+            profile = {
+                'true_favor': {
+                    'predicted_favor': 7,
+                    'predicted_against': 0,
+                    'predicted_neutral': 10,
+                },
+                'true_against': {
+                    'predicted_favor': 1,
+                    'predicted_against': 8,
+                    'predicted_neutral': 12,
+                },
+                'true_neutral': {
+                    'predicted_favor': 3,
+                    'predicted_against': 2,
+                    'predicted_neutral': 20,
+                },
+            }
+
+        profile['favor'] = {}
+        profile['favor']['precision'] = profile['true_favor']['predicted_favor'] / (profile['true_favor']['predicted_favor'] + profile['true_against']['predicted_favor'] + profile['true_neutral']['predicted_favor'])
+        profile['favor']['recall'] = profile['true_favor']['predicted_favor'] / (profile['true_favor']['predicted_favor'] + profile['true_favor']['predicted_against'] + profile['true_favor']['predicted_neutral'])
+
+        profile['against'] = {}
+        profile['against']['precision'] = profile['true_against']['predicted_against'] / (profile['true_favor']['predicted_against'] + profile['true_against']['predicted_against'] + profile['true_neutral']['predicted_against'])
+        profile['against']['recall'] = profile['true_against']['predicted_against'] / (profile['true_against']['predicted_favor'] + profile['true_against']['predicted_against'] + profile['true_against']['predicted_neutral'])
+
+        profile['neutral'] = {}
+        profile['neutral']['precision'] = profile['true_neutral']['predicted_neutral'] / (profile['true_favor']['predicted_neutral'] + profile['true_against']['predicted_neutral'] + profile['true_neutral']['predicted_neutral'])
+        profile['neutral']['recall'] = profile['true_neutral']['predicted_neutral'] / (profile['true_neutral']['predicted_favor'] + profile['true_neutral']['predicted_against'] + profile['true_neutral']['predicted_neutral'])
+
+        profile['macro'] = {}
+        profile['macro']['precision'] = (profile['favor']['precision'] + profile['against']['precision']) / 2
+        profile['macro']['recall'] = (profile['favor']['recall'] + profile['against']['recall']) / 2
+
+        all_classifier_profiles[stance][0] = profile
 
         super().__init__(comments_df, stance_columns, all_classifier_profiles, **kwargs)
 
@@ -410,6 +581,9 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
         topics_dir_path = os.path.join(root_dir_path, "data", "reddit", "1sub_1year", "topics_minilm_0_2")
         with open(os.path.join(topics_dir_path, "topic_stances.json"), "r") as f:
             topics_stances = json.load(f)
+
+        # remove french language laws
+        topics_stances['topic_stances'] = [topic_stance for topic_stance in topics_stances['topic_stances'] if topic_stance['stances'][0] not in ['french language laws', 'lgbtq rights', 'funding the cbc']]
 
         comments_df = None
         all_metric_profiles = {}
@@ -449,7 +623,7 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
                     for stance_preds_file in os.listdir(pred_path):
                         if stance_preds_file.endswith('comments.parquet.zstd'):
                             this_num_comments = re.search(r'\d+', stance_preds_file).group()
-                            if num_comments is None or this_num_comments < num_comments:
+                            if num_comments is None or this_num_comments > num_comments:
                                 num_comments = this_num_comments
                                 file_name = stance_preds_file
 
@@ -485,7 +659,7 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
                 # use a weighted voting method
                 stance_comments_df = stance_comments_df.to_pandas()
                 weighted_voting_classifier = EnsembleClassifier(metric_profiles)
-                stance_comments_df[[f'stance_{stance_slug}', 'classifier_idx']] = stance_comments_df.apply(weighted_voting_classifier.predict, axis=1, result_type='expand')
+                stance_comments_df[[stance_slug, 'classifier_idx']] = stance_comments_df.apply(weighted_voting_classifier.predict, axis=1, result_type='expand')
                 stance_comments_df = pl.from_pandas(stance_comments_df.drop([f'stance_{idx}' for idx in metric_profiles], axis=1))
 
                 if comments_df is None:
@@ -495,7 +669,7 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
 
                 all_metric_profiles[stance_slug] = metric_profiles
 
-        stance_columns = [col for col in comments_df.columns if "stance" in col]
+        stance_columns = [col for col in comments_df.columns if col not in ['user_id', 'comment_id', 'createtime', 'comment', 'parent_comment', 'post', 'classifier_idx']]
 
         comments_df = comments_df.to_pandas()
 
@@ -514,7 +688,9 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
 
         # round createtime to days, and rescale to start at 0
         comments_df['createtime'] = pd.to_datetime(comments_df['createtime'], unit='s')
-        comments_df['createtime'] = comments_df['createtime'].dt.floor('d')
-        comments_df['createtime'] = (comments_df['createtime'] - comments_df['createtime'].min()).dt.days
+        normalize_time = False
+        if normalize_time:
+            comments_df['createtime'] = comments_df['createtime'].dt.floor('d')
+            comments_df['createtime'] = (comments_df['createtime'] - comments_df['createtime'].min()).dt.days
 
         super().__init__(comments_df, stance_columns, all_metric_profiles, **kwargs)

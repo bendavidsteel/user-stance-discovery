@@ -91,6 +91,10 @@ class TopicModel:
             nr_topics=num_topics
         )
 
+    def change_dir(self, new_dir_path):
+        self.run_dir_path = new_dir_path
+        self.embedding_path = os.path.join(new_dir_path, os.path.basename(self.embedding_path))
+
     def get_embeddings(self, docs):
         if not os.path.exists(self.embedding_path):
             self.topic_model.embedding_model = select_backend(self.model,
@@ -107,7 +111,7 @@ class TopicModel:
 
         return embeddings
     
-    def fit_transform(self, docs, embeddings=None):
+    def fit_transform(self, docs, embeddings=None, write_to_file=True):
         docs = list(docs)
 
         if embeddings is None:
@@ -122,17 +126,21 @@ class TopicModel:
 
         topics, probs = self.topic_model.fit_transform(docs, embeddings=embeddings)
 
-        if not self.sample_frac:
-            with open(os.path.join(self.run_dir_path, 'topics.json'), 'w') as f:
-                json.dump([int(topic) for topic in topics], f)
+        if write_to_file:
+            if not self.sample_frac:
+                with open(os.path.join(self.run_dir_path, 'topics.json'), 'w') as f:
+                    json.dump([int(topic) for topic in topics], f)
 
-            np.save(os.path.join(self.run_dir_path, 'probs.npy'), probs)
+                np.save(os.path.join(self.run_dir_path, 'probs.npy'), probs)
+            self.write_topics_info(docs, topics, probs)
+            
 
+    def write_topics_info(self, docs=None, write_hierarchy=True):
         topic_df = self.topic_model.get_topic_info()
         topic_df.to_csv(os.path.join(self.run_dir_path, 'topic_info.csv'), index=False)
         
         # only if there are some topics 
-        if len(topic_df) > 1:
+        if write_hierarchy and docs and len(topic_df) > 1:
             hierarchical_topics = self.topic_model.hierarchical_topics(docs)
             hierarchical_topics.to_csv(os.path.join(self.run_dir_path, 'hierarchical_topics.csv'), index=False)
 

@@ -84,14 +84,13 @@ def do_stance_detection(stance, stance_slug, topic_path, topic_comments, topic_c
             best_eval_run = run
             best_eval_run_metric = fbeta
 
-    # TODO TO UNCOMMENT
-    # if best_eval_run is None or \
-    #     (   
-    #         previous_best_metrics is not None and \
-    #         chosen_metric in previous_best_metrics[stance_focus] and \
-    #         round(best_eval_run_metric, 4) <= round(previous_best_metric, 4) # round to avoid floating point errors
-    #     ):
-    #     return
+    if best_eval_run is None or \
+        (   
+            previous_best_metrics is not None and \
+            chosen_metric in previous_best_metrics[stance_focus] and \
+            round(best_eval_run_metric, 4) <= round(previous_best_metric, 4) # round to avoid floating point errors
+        ):
+        return
 
     train_num = best_eval_run.config['train_num']
     val_num = best_eval_run.config['val_num']
@@ -124,15 +123,6 @@ def do_stance_detection(stance, stance_slug, topic_path, topic_comments, topic_c
     this_metrics = eval_stance_detection(
         stance, stance_dataset, classifier, batch_size, train_num, val_num, tune_general
     )
-
-    # TODO TO REMOVE
-    result_id = best_eval_run.id
-    result_dir_path = os.path.join(topic_path, stance_slug, result_id)
-    if not os.path.exists(result_dir_path):
-        os.mkdir(result_dir_path)
-
-    with open(os.path.join(result_dir_path, 'metrics.json'), 'w') as f:
-        json.dump(this_metrics, f, indent=2)
 
     if this_metrics[stance_focus]['precision'] > 0.5:
         # evaluate against previous runs again post validation
@@ -189,32 +179,39 @@ def main():
     batch_size = 1
 
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
-    data_dir_path = os.path.join(this_dir_path, '..', '..', 'data', 'reddit', '1sub_1year')
+    data_dir_path = os.path.join(this_dir_path, '..', '..', 'data', 'reddit')
 
-    run_dir_path = os.path.join(data_dir_path, 'topics_minilm_0_2')
+    experiment = '4sub_1year'
+
+    if experiment == '1sub_1year':
+        run_dir_path = os.path.join(data_dir_path, '1sub_1year', 'topics_minilm_0_2')
+        subreddits = ['canada']
+    elif experiment == '4sub_1year':
+        run_dir_path = os.path.join(data_dir_path, '4sub_1year')
+        subreddits = ['canada', 'ontario', 'toronto', 'vancouver']
 
     with open(os.path.join(run_dir_path, 'topic_stances.json'), 'r') as f:
         all_topic_stances = json.load(f)
+
+    gold_run_dir_path = os.path.join(data_dir_path, '1sub_1year', 'topics_minilm_0_2')
+    with open(os.path.join(data_dir_path, '1sub_1year', 'topics_minilm_0_2', 'topic_stances.json'), 'r') as f:
+        gold_topic_stances = json.load(f)
 
     doc_topics_path = os.path.join(run_dir_path, 'topics.json')
     with open(doc_topics_path, 'r') as f:
         doc_topics = json.load(f)
 
-    active_users_df = pl.read_parquet(os.path.join(run_dir_path, 'active_users.parquet.gzip'))
-
-    comments_df = utils.get_comment_df(return_pd=False)
-    submissions_df = utils.get_submission_df(return_pd=False)
+    comments_df = utils.get_comment_df(return_pd=False, subreddits=subreddits)
+    submissions_df = utils.get_submission_df(return_pd=False, subreddits=subreddits)
 
     comments_df, submissions_df = utils.get_parents(comments_df, submissions_df)
     comments_df = comments_df.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('post_all_text'))
 
-    comments_df = comments_df.collect()
-    submissions_df = submissions_df.collect()
-
-    assert len(doc_topics) == len(comments_df) + len(submissions_df)
+    if experiment == '1sub_1year':
+        assert len(doc_topics) == len(comments_df) + len(submissions_df)
+    elif experiment == '4sub_1year':
+        assert len(doc_topics) == len(comments_df)
     comments_df = comments_df.with_columns(pl.Series(name='topic', values=doc_topics[:len(comments_df)]))
-
-    comments_df = comments_df.filter(pl.col('author').is_in(active_users_df['author']))
 
     for topics_stances in all_topic_stances['topic_stances']:
 
@@ -222,18 +219,23 @@ def main():
         stances = topics_stances['stances']
 
         topic_path = os.path.join(run_dir_path, f'topic_{topics[0]}')
+        if not os.path.exists(topic_path):
+            os.mkdir(topic_path)
+
+        gold_topics = [t for t in gold_topic_stances['topic_stances'] if stances[0] in t['stances']][0]['topics']
+        gold_topic_path = os.path.join(gold_run_dir_path, f'topic_{gold_topics[0]}')
 
         for stance in stances:
             stance_slug = stance.replace(' ', '_')
 
             topic_comments = None
-            comment_gold_path = os.path.join(topic_path, f'sample_context_{stance_slug}_comments_gold_stance.parquet.zstd')
+            topic_submissions = None
+            comment_gold_path = os.path.join(gold_topic_path, f'sample_context_{stance_slug}_comments_gold_stance.parquet.zstd')
             if os.path.exists(comment_gold_path):
                 topic_comments = pl.read_parquet(comment_gold_path)
                 topic_comments = topic_comments.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('post_all_text'))
 
-            topic_submissions = None
-            submission_gold_path = os.path.join(topic_path, f'sample_context_{stance_slug}_submissions_gold_stance.parquet.zstd')
+            submission_gold_path = os.path.join(gold_topic_path, f'sample_context_{stance_slug}_submissions_gold_stance.parquet.zstd')
             if os.path.exists(submission_gold_path):
                 topic_submissions = pl.read_parquet(submission_gold_path)
                 topic_submissions = topic_submissions.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('all_text'))
@@ -245,6 +247,12 @@ def main():
                 os.mkdir(os.path.join(topic_path, stance_slug))
 
             topic_comments_df = comments_df.filter(pl.col('topic').is_in(topics))
+
+            # limit to users with more than 5 comments on this topic
+            min_comments = 5
+            topic_user_comments_df = topic_comments_df.group_by('author').agg(pl.count('author').alias('num_comments'))
+            topic_user_comments_df = topic_user_comments_df.filter(pl.col('num_comments') > min_comments)
+            topic_comments_df = topic_comments_df.filter(pl.col('author').is_in(topic_user_comments_df['author']))
 
             chosen_metric = 'f0.5'
             for stance_focus in ['favor', 'against', 'neutral']:

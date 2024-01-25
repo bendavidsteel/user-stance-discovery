@@ -1,15 +1,26 @@
+import datetime
 import json
 import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 import seaborn as sns
 from sklearn.neighbors import KernelDensity
 
-import opinion_datasets, estimate
+import opinion_datasets, measures
 
-
+def corrfunc(x, y, ax=None, **kws):
+    """Plot the correlation coefficient in the top left hand corner of a plot."""
+    model = sm.OLS(x, y)
+    res = model.fit()
+    corr = res.params.iloc[0]
+    pval = res.pvalues.iloc[0]
+    r2 = res.rsquared
+    ax = ax or plt.gca()
+    ax.annotate(f'ρ = {corr:.2f}, p-val = {pval:.2f}', xy=(.1, .9), xycoords=ax.transAxes)
+    ax.annotate(f'R² = {r2:.2f}', xy=(.1, .8), xycoords=ax.transAxes)
 
 def get_gradient(x):
     x_grad = np.gradient(x)
@@ -119,11 +130,33 @@ def main():
         dataset = opinion_datasets.GenerativeOpinionTimelineDataset(num_people=num_people, max_time_step=max_time_step, num_opinions=num_opinions)
 
     num_people = dataset.num_people
-    max_time_step = dataset.max_time_step
+    min_time_step = dataset.min_time_step.to_pydatetime()
+    max_time_step = dataset.max_time_step.to_pydatetime()
 
-    all_opinions = []
-    all_users = []
-    opinion_means, opinion_variances, users = dataset[max_time_step] 
+    snapshot = 'month'
+
+    if snapshot == 'month':
+        # get all months between min and max time step
+        starts = []
+        ends = []
+        start_year = min_time_step.year
+        start_month = min_time_step.month
+        start = datetime.datetime(start_year, start_month, 1)
+        while start < max_time_step:
+            if start.month == 12:
+                end = datetime.datetime(start.year + 1, 1, 1)
+            else:
+                end = datetime.datetime(start.year, start.month + 1, 1)
+            starts.append(start)
+            ends.append(end)
+            start = end
+    else:
+        starts = [min_time_step]
+        ends = [max_time_step]
+
+    opinion_means, opinion_variances, users = dataset.get_data(start=starts, end=ends)
+
+    pretty_stances = [stance.replace('stance_', '').replace('_', ' ').title() for stance in dataset.stance_columns]
 
     if False:
         grid_size = 10
@@ -188,37 +221,166 @@ def main():
                 user_attractors[user_id] = nearest_attractor
 
     
-    num_bins = 25
-    # plot pairplot from opinion means and variances
-    user_opinion_df = pd.DataFrame(opinion_means, columns=dataset.stance_columns)
-    user_opinion_df["user"] = users
-    g = sns.pairplot(user_opinion_df, diag_kind = "hist", diag_kws = {'bins':num_bins})
-    g.savefig(os.path.join(root_dir_path, "figs", "opinion_pairplot.png"))
+    do_pairplot = True
+    if do_pairplot and opinion_means.shape[0] == 1:
+        num_bins = 25
+        # plot pairplot from opinion means and variances
+        user_opinion_df = pd.DataFrame(opinion_means[0], columns=pretty_stances)
+        user_opinion_df["user"] = users
+        g = sns.PairGrid(user_opinion_df, dropna=True)
+        g.map_diag(sns.histplot, bins=num_bins)
+        g.map_upper(sns.scatterplot)
+        g.map_upper(corrfunc)
+        g.map_lower(sns.kdeplot)
+        g.savefig(os.path.join(root_dir_path, "figs", "opinion_pairplot.png"))
 
-    fig, axes = plt.subplots(nrows=len(dataset.stance_columns), ncols=len(dataset.stance_columns), figsize=(20, 20))
-    for i, stance1 in enumerate(dataset.stance_columns):
-        for j, stance2 in enumerate(dataset.stance_columns):
-            if i == j:
-                prob_density = sum_gaussians(opinion_means, opinion_variances, i, num_bins)
-                axes[i,j].plot(np.linspace(-1, 1, num_bins), prob_density)
-                axes[i,j].set_xlabel(stance1)
-                axes[i,j].set_ylabel("Probability Density")
-            else:
-                prob_density = sum_multi_gaussians(opinion_means, opinion_variances, i, j, num_bins)
-                axes[i,j].imshow(prob_density, extent=[-1,1,-1,1], origin='lower', cmap='viridis')
-                axes[i,j].set_xlabel(stance1)
-                axes[i,j].set_ylabel(stance2)
-    fig.savefig(os.path.join(root_dir_path, "figs", "opinion_distribution_pairplot.png"))
+        height = len(dataset.stance_columns) * 2.5
+        with sns.utils._disable_autolayout():
+            fig = plt.figure(figsize=(height, height))
+        
+        axes = [[None for _ in range(len(dataset.stance_columns))] for _ in range(len(dataset.stance_columns))]
+        for i, stance1 in enumerate(pretty_stances):
+            for j, stance2 in enumerate(pretty_stances):
+                if i == j:
+                    share_ax = axes[i-1][j-1] if i > 0 else None
+                    ax = fig.add_subplot(len(dataset.stance_columns), len(dataset.stance_columns), i * len(dataset.stance_columns) + j + 1, sharex=share_ax)
+                    prob_density = sum_gaussians(opinion_means[0], opinion_variances[0], i, num_bins)
+                    ax.plot(np.linspace(-1, 1, num_bins), prob_density)
+                    if i == len(dataset.stance_columns) - 1:
+                        ax.set_xlabel(stance1)
+                    if j == 0:
+                        ax.set_ylabel(stance1)
+                else:
+                    share_y_ax = axes[i][j-1] if j > 0 and j-1 != i else None
+                    share_x_ax = axes[i-1][j] if i > 0 and i-1 != j else None
+                    ax = fig.add_subplot(len(dataset.stance_columns), len(dataset.stance_columns), i * len(dataset.stance_columns) + j + 1, sharex=share_x_ax, sharey=share_y_ax)
+                    prob_density = sum_multi_gaussians(opinion_means[0], opinion_variances[0], i, j, num_bins)
+                    ax.imshow(prob_density, extent=[-1,1,-1,1], origin='lower', cmap='viridis')
+                    if i == len(dataset.stance_columns) - 1:
+                        ax.set_xlabel(stance2)
+                    if j == 0:
+                        ax.set_ylabel(stance1)
+                axes[i][j] = ax
+        fig.savefig(os.path.join(root_dir_path, "figs", "opinion_distribution_pairplot.png"))
 
 
-    get_examples = True
+    do_dist_change = True
+    if do_dist_change and opinion_means.shape[0] > 1:
+        num_bins = 25
+        height = len(dataset.stance_columns) * 2.5
+        with sns.utils._disable_autolayout():
+            fig = plt.figure(figsize=(height, height))
+        
+        axes = [[None for _ in range(len(dataset.stance_columns))] for _ in range(len(dataset.stance_columns))]
+        for i, stance1 in enumerate(pretty_stances):
+            for j, stance2 in enumerate(pretty_stances):
+                if i == j:
+                    share_ax = axes[i-1][j-1] if i > 0 else None
+                    ax = fig.add_subplot(len(dataset.stance_columns), len(dataset.stance_columns), i * len(dataset.stance_columns) + j + 1)
+                    mean_timeline = np.zeros(opinion_means.shape[0])
+                    var_timeline = np.zeros(opinion_means.shape[0])
+                    for k in range(opinion_means.shape[0]):
+                        # remove nans
+                        stance_opinion_means = opinion_means[k, :, i]
+                        stance_opinion_means = stance_opinion_means[~np.isnan(stance_opinion_means)]
+                        hist, bin_edges = np.histogram(stance_opinion_means, bins=num_bins, density=False)
+                        bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+                        hist_mean = np.sum(hist * bin_centres) / np.sum(hist)
+                        hist_var = np.sum(hist * (bin_centres - hist_mean) ** 2) / (np.sum(hist) - 1)
+                        mean_timeline[k] = hist_mean
+                        var_timeline[k] = hist_var
+
+                    ax.errorbar(ends, mean_timeline, yerr=np.sqrt(var_timeline))
+                    ax.xaxis_date()
+
+                    if i == len(dataset.stance_columns) - 1:
+                        ax.set_xlabel(stance1)
+                    if j == 0:
+                        ax.set_ylabel(stance1)
+                else:
+                    share_y_ax = axes[i][j-1] if j > 0 and j-1 != i else None
+                    share_x_ax = axes[i-1][j] if i > 0 and i-1 != j else None
+                    ax = fig.add_subplot(len(dataset.stance_columns), len(dataset.stance_columns), i * len(dataset.stance_columns) + j + 1)
+                    
+                    corr_timeline = np.zeros(opinion_means.shape[0])
+                    rsquared_timeline = np.zeros(opinion_means.shape[0])
+                    for k in range(opinion_means.shape[0]):
+                        stance_opinion_means = opinion_means[k, :, [i,j]]
+                        stance_opinion_means = stance_opinion_means[:,~np.isnan(stance_opinion_means).any(axis=0)]
+                        model = sm.OLS(stance_opinion_means[0], stance_opinion_means[1])
+                        res = model.fit()
+                        corr = res.params[0]
+                        r2 = res.rsquared
+                        corr_timeline[k] = corr
+                        rsquared_timeline[k] = r2
+
+                    ax.errorbar(ends, corr_timeline, yerr=1 - rsquared_timeline)
+                    ax.xaxis_date()
+
+                    if i == len(dataset.stance_columns) - 1:
+                        ax.set_xlabel(stance2)
+                    if j == 0:
+                        ax.set_ylabel(stance1)
+                axes[i][j] = ax
+
+        fig.autofmt_xdate()
+        fig.savefig(os.path.join(root_dir_path, "figs", "opinion_timeline_pairplot.png"))
+
+    do_polarization = True
+    if do_polarization:
+        def prep_for_polarization(opinion_means, i=0):
+            cols = [i for i, stance in enumerate(dataset.stance_columns)]
+            opinion_means = opinion_means[i,:,cols].T
+            opinion_means = np.nan_to_num(opinion_means)
+            opinion_means = 0.5 * (opinion_means + 1)
+            return opinion_means
+        
+        if opinion_means.shape[0] > 1:
+            symmetric_polarization_timeline = np.zeros(opinion_means.shape[0])
+            for i in range(opinion_means.shape[0]):
+                polarization = measures.symmetric_polarization(prep_for_polarization(opinion_means, i))
+                symmetric_polarization_timeline[i] = polarization
+                asymm_polarizations = measures.asymmetric_polarization(prep_for_polarization(opinion_means, i))
+            fig, ax = plt.subplots()
+            ax.plot(ends, symmetric_polarization_timeline)
+            ax.xaxis_date()
+            ax.set_xlabel("Time Step")
+            ax.set_ylabel("Symmetric Polarization")
+            fig.autofmt_xdate()
+            fig.savefig(os.path.join(root_dir_path, "figs", "symmetric_polarization_timeline.png"))
+            
+        else:
+            polarization = measures.symmetric_polarization(prep_for_polarization(opinion_means))
+            partitions, asymm_polarizations = measures.asymmetric_polarization(prep_for_polarization(opinion_means))
+            print(f"Symmetric Polarization: {polarization}")
+
+            # get top 5 polarized partitions
+            top_polarization = np.sort(asymm_polarizations)[-5:]
+            top_polarization_indices = np.argsort(asymm_polarizations)[-5:]
+            top_partitions = [partitions[i] for i in top_polarization_indices]
+            for i in range(4, -1, -1):
+                partition = top_partitions[i]
+                partition_str = ", ".join([dataset.stance_columns[j].replace('stance_', '').replace('_', ' ').title() for j in partition])
+                print(f"Partition {i+1}: {partition_str}, Asymmetric Polarization: {top_polarization[i]}")
+
+            # get least polarized partitions
+            top_polarization = np.sort(asymm_polarizations)[:5]
+            top_polarization_indices = np.argsort(asymm_polarizations)[:5]
+            top_partitions = [partitions[i] for i in top_polarization_indices]
+            for i in range(5):
+                partition = top_partitions[i]
+                partition_str = ", ".join([dataset.stance_columns[j].replace('stance_', '').replace('_', ' ').title() for j in partition])
+                print(f"Partition {i+1}: {partition_str}, Asymmetric Polarization: {top_polarization[i]}")
+
+    get_examples = False
     if get_examples:
         # get examples of moderate and extreme users for each opinion
         for stance in dataset.stance_columns:
-            extreme_favor_user = user_opinion_df.sort_values(by=stance, ascending=False).head(1).iloc[0]
-            extreme_against_user = user_opinion_df.sort_values(by=stance, ascending=True).head(1).iloc[0]
+            user_stance_df = user_opinion_df[user_opinion_df[stance].notna()]
+            extreme_favor_user = user_stance_df.sort_values(by=stance, ascending=False).head(1).iloc[0]
+            extreme_against_user = user_stance_df.sort_values(by=stance, ascending=True).head(1).iloc[0]
             # get user with stance closest to 0
-            moderate_user = user_opinion_df.iloc[user_opinion_df[stance].abs().argsort()[0]]
+            moderate_user = user_stance_df.iloc[user_stance_df[stance].abs().argsort().iloc[0]]
 
             def print_comments(comment_df, stance):
                 comment_df = comment_df[comment_df[stance].notna()]

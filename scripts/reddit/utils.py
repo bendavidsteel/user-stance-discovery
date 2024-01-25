@@ -9,39 +9,39 @@ def get_data_dir_path():
     data_dir_path = os.path.join(this_dir_path, '..', '..', 'data', 'reddit')
     return data_dir_path
 
-def get_comment_df(return_pd=True):
+def get_comment_df(return_pd=True, subreddits=['canada']):
     data_dir_path = get_data_dir_path()
 
     comments_dir_path = os.path.join(data_dir_path, 'processed_comments')
     comment_df = None
     for file_name in sorted(os.listdir(comments_dir_path)):
-        if re.match(r'canada_comments_filtered_\d{4}-\d{2}.parquet.gzip', file_name):
-            file_df = pl.scan_parquet(os.path.join(comments_dir_path, file_name))
+        if any(re.match(subreddit_name + r'_comments_filtered_\d{4}-\d{2}.parquet.gzip', file_name) for subreddit_name in subreddits):
+            file_df = pl.read_parquet(os.path.join(comments_dir_path, file_name))
             if comment_df is None:
                 comment_df = file_df
             else:
-                comment_df = pl.concat([comment_df, file_df])
+                comment_df = pl.concat([comment_df, file_df], how='diagonal')
 
     if return_pd:
-        comment_df = comment_df.collect().to_pandas()
+        comment_df = comment_df.to_pandas()
 
     return comment_df
 
-def get_submission_df(return_pd=True):
+def get_submission_df(return_pd=True, subreddits=['canada']):
     data_dir_path = get_data_dir_path()
 
     submissions_dir_path = os.path.join(data_dir_path, 'processed_submissions')
     submission_df = None
     for file_name in sorted(os.listdir(submissions_dir_path)):
-        if re.match(r'canada_submissions_filtered_\d{4}-\d{2}.parquet.gzip', file_name):
-            file_df = pl.scan_parquet(os.path.join(submissions_dir_path, file_name))
+        if any(re.match(subreddit_name + r'_submissions_filtered_\d{4}-\d{2}.parquet.gzip', file_name) for subreddit_name in subreddits):
+            file_df = pl.read_parquet(os.path.join(submissions_dir_path, file_name))
             if submission_df is None:
                 submission_df = file_df
             else:
                 submission_df = pl.concat([submission_df, file_df])
 
     if return_pd:
-        submission_df = submission_df.collect().to_pandas()
+        submission_df = submission_df.to_pandas()
 
     return submission_df
 

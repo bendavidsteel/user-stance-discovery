@@ -1,4 +1,7 @@
-import torch
+import itertools
+
+import numpy as np
+import tqdm
 
 ######################################################
 ## The Esteban-Ray polarization measure implementation
@@ -17,7 +20,7 @@ def belief_2_dist(belief_vec, num_bins=10):
     # for all agents...
     for belief in belief_vec:
         # computes the bin into which the agent's belief falls
-        bin_ = math.floor(belief * num_bins)
+        bin_ = np.floor(belief * num_bins)
         # treats the extreme case in which belief is 1, putting the result in the right bin.
         if bin_ == num_bins:
             bin_ = num_bins - 1
@@ -50,51 +53,48 @@ def pol_ER(dist, alpha=1.6, K=1):
 def symmetric_polarization(beliefs):
     """Computes the symmetric polarization of a group of agents.
     """
-    assert beliefs.sum(axis=1).all() == 1, "Beliefs must sum to 1 along each row."
 
     n = beliefs.shape[0]
     # computes the mean belief of the group along each belief axis
-    mean_belief = beliefs.mean(axis=0)
+    mean_belief = np.mean(beliefs, axis=0)
     # computes the polarization of the group
-    polarization = (beliefs - mean_belief).abs().sum() / (2 * n)
+    polarization = np.sum(np.abs(beliefs - mean_belief)) / (2 * n)
     # returns the polarization.
     return polarization
 
 def asymmetric_polarization(beliefs):
     '''Computes the asymmetric polarization of a group of agents.
     '''
-    assert beliefs.sum(axis=1).all() == 1, "Beliefs must sum to 1 along each row."
 
     n = beliefs.shape[0]
     m = beliefs.shape[1]
 
     # find every 2-subset partitions of the beliefs
     partitions = fast_k_subset_partitions(list(range(m)), 2)
-    ps = []
+    partitions = list(partitions)
 
-    for partition in partitions:
+    ps = np.zeros(len(partitions))
+    for i, partition in enumerate(tqdm.tqdm(partitions)):
         m1 = partition[1]
+        ys = np.mean(beliefs[:, m1], axis=1)
+        ys = np.sort(ys)
 
-        # get the aggregated opinion for this pole
-        ys = beliefs[:, m1].sum(axis=1)
+        cum_sum_ys = np.cumsum(ys)
+        total_sum = cum_sum_ys[-1]
 
-        # sort the aggregated opinions
-        ys = ys.sort()[0]
+        # Vectorized computation for all partitions
+        i_values = np.arange(1, n)
+        sum_yn0 = cum_sum_ys[i_values - 1]
+        sum_yn1 = total_sum - sum_yn0
 
-        # find the highest polarization partition
-        max_p = 0
-        for i in range(1, n):
-            yn0 = ys[:i]
-            yn1 = ys[i:]
+        # Calculate p for all partitions
+        p_values = i_values * sum_yn1 - (n - i_values) * sum_yn0
+        max_p = np.max(p_values)
 
-            # get the cross product difference of the two partitions
-            p = (yn1.view(-1, 1).expand(-1, len(yn0)) - yn0.view(1, -1).expand(len(yn1), -1)).sum()
-            if p > max_p:
-                max_p = p
-        
-        ps.append(max_p / (4 * n**2))
+        divisor = 4 * n**2
+        ps[i] = max_p / divisor
 
-    return ps
+    return [p[1] for p in partitions], ps
 
 def fast_k_subset_partitions(ns, m):
     def visit(n, a):

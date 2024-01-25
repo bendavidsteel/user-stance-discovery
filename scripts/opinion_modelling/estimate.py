@@ -134,24 +134,43 @@ class StanceEstimation:
             # Sample latent comment stances
             comment_stances = pyro.sample("latent_comment_stance", dist.Normal(latent_locs, comment_var))
 
-    def calculate_statistics(self, data):
-        predictions = []
-        weights = []
-        for i in range(len(data)):
-            stance_pred = data[i]["predicted_stance"]
-            predictor_id = data[i]["predictor_id"]
-            obs_mapping = {-1: 0, 0: 1, 1: 2}
-            mapped_stance_pred = obs_mapping[stance_pred]
-            true_probs = self.predictor_confusion_probs[self.stance]['true_probs'][predictor_id, mapped_stance_pred, :]
-            predictor_precision = true_probs[mapped_stance_pred] / torch.sum(true_probs)
-            predictions.append(stance_pred)
-            weights.append(predictor_precision)
+    def categorical_model(self, data):
+        user_stance = pyro.param("user_stance", torch.tensor([1/3, 1/3, 1/3]), constraint=dist.constraints.simplex)
 
-        predictions, weights = torch.tensor(predictions), torch.tensor(weights)
-        weighted_mean = torch.sum(predictions * weights) / torch.sum(weights)
-        ex2 = torch.sum(predictions ** 2 * weights) / torch.sum(weights)
-        weighted_variance = (ex2 - (weighted_mean ** 2)) * torch.sum(weights) / (torch.sum(weights) - 1)
-        return weighted_mean, weighted_variance
+        # loop over the observed data
+        with pyro.plate("observed_data", len(data)):
+            predictor_ids = torch.tensor([d['predictor_id'] for d in data])
+            
+            # User creates comments with latent stance
+            # Standard deviation should be half the distance between categories
+            # comment_var = (1/2) ** 2
+            comment_stance_cats = pyro.sample("latent_comment_stance", dist.Categorical(probs=user_stance).expand([len(data)]))
+
+            # Get prediction probabilities based on the confusion matrix
+            # Assume self.predictor_confusion_probs is properly vectorized to handle batched inputs
+            predict_probs = self.predictor_confusion_probs[self.stance]['predict_probs'][predictor_ids, comment_stance_cats, :]
+
+            # Map predicted stances
+            obs_mapping = {-1: 0, 0: 1, 1: 2}
+            mapped_predicted_stances = torch.tensor([obs_mapping[d['predicted_stance']] for d in data])
+
+            pyro.sample("predicted_comment_stance", dist.Categorical(probs=predict_probs), obs=mapped_predicted_stances)
+
+
+    def categorical_guide(self, data):
+        # loop over the observed data
+        with pyro.plate("observed_data", len(data)):
+            predictor_ids = torch.tensor([d['predictor_id'] for d in data])
+
+            # Map predicted stances
+            obs_mapping = {-1: 0, 0: 1, 1: 2}
+            mapped_predicted_stances = torch.tensor([obs_mapping[d['predicted_stance']] for d in data])
+
+            # Get true probabilities from the confusion matrix
+            true_probs = self.predictor_confusion_probs[self.stance]['true_probs'][predictor_ids, mapped_predicted_stances, :]
+
+            # Sample latent comment stance categories
+            comment_stance_cats = pyro.sample("latent_comment_stance", dist.Categorical(probs=true_probs))
 
 
 def main():
