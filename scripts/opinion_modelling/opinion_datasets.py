@@ -10,7 +10,7 @@ import torch
 import tqdm
 
 import generative
-import opinions
+import estimate
 
 def nansum(x, **kwargs):
     s = np.nansum(x, **kwargs)
@@ -171,7 +171,7 @@ class RedditInteractionDataset(SocialInteractionDataset):
 
 
 class OpinionTimelineDataset:
-    def __init__(self, comment_df, stance_columns, all_classifier_profiles, aggregation=None, halflife=50.0, min_num_per_stance=None):
+    def __init__(self, comment_df, stance_columns, all_classifier_profiles, user_mode_attrs=None, aggregation=None, halflife=50.0, min_num_per_stance=None):
         assert len(comment_df) > 0, "comment_df must not be empty"
         assert 'createtime' in comment_df.columns, "createtime column not found"
         assert 'user_id' in comment_df.columns, "user_id column not found"
@@ -202,8 +202,11 @@ class OpinionTimelineDataset:
         self.aggregation = aggregation
         self.min_time_step = self.comment_df['createtime'].min()
         self.max_time_step = self.comment_df['createtime'].max()
-        self.users = self.comment_df['user_id'].unique()
+        self.users = self.comment_df['user_id'].to_frame().drop_duplicates().reset_index(drop=True)
 
+        if user_mode_attrs is not None:
+            self.users = self.users.merge(self.comment_df.groupby('user_id')[user_mode_attrs].agg(lambda x: pd.Series.mode(x)[0]).reset_index(), on='user_id')
+        
         self.aggregation = aggregation
         self.halflife = halflife
 
@@ -221,7 +224,7 @@ class OpinionTimelineDataset:
             opinion_sequences = np.full((len(self.users), max_content, self.num_opinions), np.nan)
             classifier_indices = np.zeros((len(self.users), max_content), dtype=np.int64)
 
-            for i, user_id in enumerate(self.users):
+            for i, user_id in enumerate(self.users['user_id']):
                 try:
                     user_comments = user_comments_df.get_group(user_id)
                 except KeyError:
@@ -233,10 +236,13 @@ class OpinionTimelineDataset:
 
             if self.aggregation == "weighted_mean":
                 opinion_means, opinion_variances = self._weighted_mean_and_variance(opinion_sequences, classifier_indices)
-                return opinion_means, opinion_variances, self.users
+                return (opinion_means, opinion_variances), self.users
+            elif self.aggregation == "inferred_categorical":
+                opinion_categorical = estimate.get_inferred_categorical(self, opinion_sequences, classifier_indices)
+                return (opinion_categorical,), self.users
             elif self.aggregation == "weighted_exponential_smoothing":
                 days_past = np.full((len(self.users), max_content), np.nan)
-                for i, user_id in enumerate(self.users):
+                for i, user_id in enumerate(self.users['user_id']):
                     try:
                         user_comments = user_comments_df.get_group(user_id)
                     except KeyError:
@@ -246,17 +252,21 @@ class OpinionTimelineDataset:
                     days_past[i, :len(days_ago)] = days_ago
 
                 opinion_means, opinion_variances = self._weighted_exponential_smoothing(opinion_sequences, days_past, classifier_indices)
-                return opinion_means, opinion_variances, self.users
+                return (opinion_means, opinion_variances), self.users
             else:
                 return opinion_sequences, self.users, classifier_indices
             
         elif hasattr(start, '__iter__') and hasattr(end, '__iter__'):
             assert len(start) == len(end), "start and end must be the same length"
-            assert self.aggregation in ["weighted_mean", "weighted_exponential_smoothing"], "aggregation must be weighted_mean or weighted_exponential_smoothing"
             users_comments = {user_id: user_comments.sort_values('createtime') for user_id, user_comments in self.comment_df.groupby('user_id')}
-            opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions))
-            opinion_timeline_var = np.zeros((len(end), len(self.users), self.num_opinions))
-            precision_weights = None
+            if self.aggregation in ["weighted_mean", "weighted_exponential_smoothing"]:
+                opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions))
+                opinion_timeline_var = np.zeros((len(end), len(self.users), self.num_opinions))
+                precision_weights = None
+            elif self.aggregation == "inferred_categorical":
+                opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions, 3))
+            else:
+                raise ValueError("Invalid args")
 
             for idx in tqdm.tqdm(range(len(end))):
                 users_time_comments = {user_id: user_comments[(user_comments['createtime'] >= start[idx]) & (user_comments['createtime'] <= end[idx])] for user_id, user_comments in users_comments.items()}
@@ -264,34 +274,41 @@ class OpinionTimelineDataset:
 
                 opinion_sequences = np.full((len(self.users), max_content, self.num_opinions), np.nan, dtype=np.float16)
                 classifier_indices = np.zeros((len(self.users), max_content), dtype=np.int8)
-                for i, user_id in enumerate(self.users):
+                for i, user_id in enumerate(self.users['user_id']):
                     user_time_comments = users_time_comments[user_id]
                     user_opinions = user_time_comments[self.stance_columns].values
                     opinion_sequences[i, :len(user_opinions), :] = user_opinions.astype(np.float16)
                     classifier_indices[i, :len(user_opinions)] = user_time_comments['classifier_idx'].values.astype(np.int8)
 
-                precision_weights = self._get_prediction_weights(opinion_sequences, classifier_indices)
-                    
-                if self.aggregation == "weighted_exponential_smoothing":
-                    days_past = np.full((len(self.users), max_content), np.nan)
-                    for i, user_id in enumerate(self.users):
-                        user_time_comments = users_time_comments[user_id]
-                        if isinstance(end[idx], float) and user_time_comments['createtime'].dtype == np.float64:
-                            days_ago = np.ceil(end[idx]) - user_time_comments['createtime'].values
-                        elif isinstance(end[idx], datetime.datetime) and user_time_comments['createtime'].dtype == np.dtype('datetime64[ns]'):
-                            # convert to days
-                            days_ago = (pd.to_datetime(end[idx]) - pd.to_datetime(user_time_comments['createtime'])).dt.days.values
-                        days_past[i, :len(days_ago)] = days_ago
+                if self.aggregation in ["weighted_mean", "weighted_exponential_smoothing"]:
+                    precision_weights = self._get_prediction_weights(opinion_sequences, classifier_indices)
+                        
+                    if self.aggregation == "weighted_exponential_smoothing":
+                        days_past = np.full((len(self.users), max_content), np.nan)
+                        for i, user_id in enumerate(self.users):
+                            user_time_comments = users_time_comments[user_id]
+                            if isinstance(end[idx], float) and user_time_comments['createtime'].dtype == np.float64:
+                                days_ago = np.ceil(end[idx]) - user_time_comments['createtime'].values
+                            elif isinstance(end[idx], datetime.datetime) and user_time_comments['createtime'].dtype == np.dtype('datetime64[ns]'):
+                                # convert to days
+                                days_ago = (pd.to_datetime(end[idx]) - pd.to_datetime(user_time_comments['createtime'])).dt.days.values
+                            days_past[i, :len(days_ago)] = days_ago
 
-                    exp_weights = self._get_exp_weights(opinion_sequences, days_past)
-                    weights = precision_weights[:, :exp_weights.shape[1], :] * exp_weights
-                else:
-                    weights = precision_weights
-                
-                opinion_means, opinion_variances = self._calc_weighted_mean_and_variance(opinion_sequences, weights)
-                opinion_timeline[idx] = opinion_means
-                opinion_timeline_var[idx] = opinion_variances
-            return opinion_timeline, opinion_timeline_var, self.users
+                        exp_weights = self._get_exp_weights(opinion_sequences, days_past)
+                        weights = precision_weights[:, :exp_weights.shape[1], :] * exp_weights
+                    else:
+                        weights = precision_weights
+                    
+                    opinion_means, opinion_variances = self._calc_weighted_mean_and_variance(opinion_sequences, weights)
+                    opinion_timeline[idx] = opinion_means
+                    opinion_timeline_var[idx] = opinion_variances
+                elif self.aggregation == "inferred_categorical":
+                    opinion_timeline[idx] = estimate.get_inferred_categorical(self, opinion_sequences, classifier_indices)
+
+            if self.aggregation in ["weighted_mean", "weighted_exponential_smoothing"]:
+                return (opinion_timeline, opinion_timeline_var), self.users
+            elif self.aggregation == "inferred_categorical":
+                return (opinion_timeline,), self.users
         else:
             raise ValueError("Invalid args")
 
@@ -406,10 +423,20 @@ class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
         stance_columns = [f'stance_{i}' for i in range(num_opinions)]
         comments_df[stance_columns] = np.array([np.array(o) for o in comments_df['opinions']])
 
+        comments_df['classifier_idx'] = 0
         all_classifier_profiles = {}
-        for stance_idx in range(num_opinions):
-            all_classifier_profiles[stance_idx] = {}
-            all_classifier_profiles[stance_idx][0] = {
+        for stance in stance_columns:
+            all_classifier_profiles[stance] = {}
+            all_classifier_profiles[stance][0] = {
+                'against': {
+                    'precision': 1.0,
+                },
+                'neutral': {
+                    'precision': 1.0,
+                },
+                'favor': {
+                    'precision': 1.0,
+                },
                 'true_favor': {
                     'predicted_favor': 1,
                     'predicted_against': 0,
@@ -574,11 +601,8 @@ class EnsembleClassifier:
         return best_stance, best_classifier_idx
 
 class RedditOpinionTimelineDataset(OpinionTimelineDataset):
-    def __init__(self, **kwargs):
+    def __init__(self, topics_dir_path, **kwargs):
 
-        this_dir_path = os.path.dirname(os.path.realpath(__file__))
-        root_dir_path = os.path.join(this_dir_path, "..", "..")
-        topics_dir_path = os.path.join(root_dir_path, "data", "reddit", "1sub_1year", "topics_minilm_0_2")
         with open(os.path.join(topics_dir_path, "topic_stances.json"), "r") as f:
             topics_stances = json.load(f)
 
@@ -603,28 +627,35 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
                     best_metric = 0
                     best_metrics = None
                     best_dir_name = None
+                    best_num_comments = 0
                     for dir_name in os.listdir(stance_path):
                         metrics_path = os.path.join(stance_path, dir_name, "metrics.json")
+                        most_num_comments = 0
+                        for filename in os.listdir(os.path.join(stance_path, dir_name)):
+                            if not filename.endswith('metrics.json'):
+                                num_comments = int(re.search(r'\d+', filename).group())
+                                if num_comments > most_num_comments:
+                                    most_num_comments = num_comments
+                        
                         with open(metrics_path, "r") as f:
                             metrics = json.load(f)
                         metric = metrics[stance_focus]['f0.5']
-                        if metric > best_metric and metrics[stance_focus]['precision'] > 0.5:
+                        if (metric > best_metric or (metric == best_metric and most_num_comments > best_num_comments)) and metrics[stance_focus]['precision'] > 0.5:
                             best_metric = metric
                             best_metrics = metrics
                             best_dir_name = dir_name
+                            best_num_comments = most_num_comments
                     
                     if best_dir_name is None:
                         continue
 
                     pred_path = os.path.join(stance_path, best_dir_name)
                     # get smallest stance predictions
-                    num_comments = None
                     file_name = None
                     for stance_preds_file in os.listdir(pred_path):
                         if stance_preds_file.endswith('comments.parquet.zstd'):
-                            this_num_comments = re.search(r'\d+', stance_preds_file).group()
-                            if num_comments is None or this_num_comments > num_comments:
-                                num_comments = this_num_comments
+                            this_num_comments = int(re.search(r'\d+', stance_preds_file).group())
+                            if this_num_comments == best_num_comments:
                                 file_name = stance_preds_file
 
                     if file_name is None or not os.path.exists(os.path.join(pred_path, file_name)):
@@ -632,7 +663,7 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
 
                     focus_stance_comments_df = pl.read_parquet(
                         os.path.join(pred_path, file_name), 
-                        columns=['author', 'id', 'created_utc', 'body', 'body_parent', 'post_all_text', 'stance']
+                        columns=['author', 'id', 'created_utc', 'body', 'body_parent', 'post_all_text', 'stance', 'subreddit']
                     )
                     
                     # rename stance column to stance_{stance}
@@ -645,6 +676,7 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
                             "body": "comment",
                             "body_parent": "parent_comment",
                             "post_all_text": "post",
+                            "subreddit": "subreddit"
                         }
                     )
 
@@ -669,7 +701,7 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
 
                 all_metric_profiles[stance_slug] = metric_profiles
 
-        stance_columns = [col for col in comments_df.columns if col not in ['user_id', 'comment_id', 'createtime', 'comment', 'parent_comment', 'post', 'classifier_idx']]
+        stance_columns = [col for col in comments_df.columns if col not in ['user_id', 'comment_id', 'createtime', 'comment', 'parent_comment', 'post', 'classifier_idx', 'subreddit']]
 
         comments_df = comments_df.to_pandas()
 
@@ -693,4 +725,4 @@ class RedditOpinionTimelineDataset(OpinionTimelineDataset):
             comments_df['createtime'] = comments_df['createtime'].dt.floor('d')
             comments_df['createtime'] = (comments_df['createtime'] - comments_df['createtime'].min()).dt.days
 
-        super().__init__(comments_df, stance_columns, all_metric_profiles, **kwargs)
+        super().__init__(comments_df, stance_columns, all_metric_profiles, user_mode_attrs=['subreddit'], **kwargs)

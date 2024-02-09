@@ -3,6 +3,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import tqdm
 
 import estimate, opinion_datasets
 
@@ -53,10 +54,11 @@ def pyro_hmm(opinion_sequences, classifier_indices, estimator, dataset):
                 dist.Dirichlet(0.9 * torch.eye(num_states) + 0.1).to_event(1),
             )
 
+        output_plate = pyro.plate("outputs", data_dim, dim=-1)
         # We subsample batch_size items out of num_sequences items.
         for i in pyro.plate("sequences", num_sequences):
             length = lengths[i]
-            sequence = sequences[i, :length, 0]
+            sequence = sequences[i, :length, :]
             seq_classifier_indices = classifier_indices[i, :length]
             x = 0
             # If we are not using the jit, then we can vary the program structure
@@ -72,28 +74,34 @@ def pyro_hmm(opinion_sequences, classifier_indices, estimator, dataset):
                     infer={"enumerate": "parallel"},
                 )
                 predict_probs = predictor_probs[seq_classifier_indices[t], x.squeeze(-1), :]
-                pyro.sample(
-                    f"y_{i}_{t}",
-                    dist.Categorical(predict_probs),
-                    obs=sequence[t],
-                )
+                with output_plate:
+                    pyro.sample(
+                        f"y_{i}_{t}",
+                        dist.Categorical(predict_probs.unsqueeze(0)),
+                        obs=sequence[t],
+                    )
 
     def model_1(sequences, classifier_indices, lengths, predictor_probs, num_states=3, jit=True, batch_size=None, include_prior=True):
         with ignore_jit_warnings():
-            num_sequences, max_length, data_dim = map(int, sequences.shape)
+            num_sequences, max_length = map(int, sequences.shape)
             assert lengths.shape == (num_sequences,)
             assert lengths.max() <= max_length
         with poutine.mask(mask=include_prior):
+            start_probs = pyro.sample(
+                "probs_start",
+                dist.Dirichlet(torch.tensor([0.1, 0.8, 0.1])),
+            )
             probs_x = pyro.sample(
                 "probs_x",
                 dist.Dirichlet(0.9 * torch.eye(num_states) + 0.1).to_event(1),
             )
+        emission_probs = torch.tensor([[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]).to(device)
 
         # We subsample batch_size items out of num_sequences items.
-        outputs_plate = pyro.plate("outputs", data_dim, dim=-1)
-        with pyro.plate("sequences", num_sequences, batch_size, dim=-2) as batch:
+        # outputs_plate = pyro.plate("outputs", data_dim, dim=-1)
+        with pyro.plate("sequences", num_sequences, batch_size, dim=-1) as batch:
             lengths = lengths[batch]
-            x = 0
+            x = pyro.sample("x_start", dist.Categorical(start_probs), infer={"enumerate": "parallel"})
             # If we are not using the jit, then we can vary the program structure
             # each call by running for a dynamically determined number of time
             # steps, lengths.max(). However if we are using the jit, then we try to
@@ -101,33 +109,38 @@ def pyro_hmm(opinion_sequences, classifier_indices, estimator, dataset):
             # structure ends up being faster since each program structure would
             # need to trigger a new jit compile stage.
             for t in pyro.markov(range(max_length if jit else lengths.max())):
-                with poutine.mask(mask=(t < lengths).unsqueeze(-1)):
+                with poutine.mask(mask=(t < lengths)):
                     x = pyro.sample(
-                        "x_{}".format(t),
+                        f"x_{t}",
                         dist.Categorical(probs_x[x]),
                         infer={"enumerate": "parallel"},
                     )
-                    predict_probs = predictor_probs[classifier_indices[batch, t], x.squeeze(-1), :]
-                    with outputs_plate:
-                        pyro.sample(
-                            "y_{}".format(t),
-                            dist.Categorical(predict_probs.view((batch_size, data_dim, num_states))),
-                            obs=sequences[batch, t],
-                        )
+                    y = pyro.sample(
+                        f"y_{t}",
+                        dist.Categorical(emission_probs[x]),
+                        infer={"enumerate": "parallel"},
+                    )
+                    predict_probs = predictor_probs[classifier_indices[batch, t], y.squeeze(-1), :]
+                    # with outputs_plate:
+                    pyro.sample(
+                        f"obs_y_{t}",
+                        dist.Categorical(predict_probs),
+                        obs=sequences[batch, t],
+                    )
 
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
     pyro.set_rng_seed(42)
 
-    model = model_0
+    model = model_1
     learning_rate = 0.001
-    jit = True
+    jit = False
     num_steps = 1000
-    batch_size = 8
+    batch_size = 32
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     classifier_indices = torch.tensor(classifier_indices).to(device)
 
     for stance_idx, stance in enumerate(dataset.stance_columns):
-        sequences = torch.tensor(opinion_sequences[:,:,stance_idx:stance_idx+1]).to(device)
+        sequences = torch.tensor(opinion_sequences[:,:,stance_idx] + 1).to(device)
         lengths = torch.tensor(sequences.shape[1] * np.ones(sequences.shape[0], dtype=int)).to(device)
         predictor_probs = estimator.predictor_confusion_probs[stance]['predict_probs'].to(device)
         num_observations = float(lengths.sum())
@@ -145,22 +158,24 @@ def pyro_hmm(opinion_sequences, classifier_indices, estimator, dataset):
         # Enumeration requires a TraceEnum elbo and declaring the max_plate_nesting.
         # All of our models have one plate: "data".
         optim = Adam({"lr": learning_rate})
-        Elbo = JitTraceEnum_ELBO if jit else TraceEnum_ELBO
-        elbo = Elbo(
-            max_plate_nesting=1,
+        elbo = JitTraceEnum_ELBO if jit else TraceEnum_ELBO
+        elbo = elbo(
+            max_plate_nesting=1 if model.__name__ == 'model_0' else 1,
             strict_enumeration_warning=(True),
         )
         svi = SVI(model, guide, optim, elbo)
 
         # We'll train on small minibatches.
-        for step in range(num_steps):
-            loss = svi.step(sequences, classifier_indices, lengths, predictor_probs, batch_size=min(batch_size, len(sequences)))
-            print("{: >5d}\t{}".format(step, loss / num_observations))
+        pbar = tqdm.tqdm(range(num_steps))
+        for step in pbar:
+            loss = svi.step(sequences, classifier_indices, lengths, predictor_probs, jit=jit, batch_size=min(batch_size, len(sequences)))
+            pbar.set_description(f"loss: {loss / num_observations:.4f}")
 
-        # We evaluate on the entire training dataset,
-        # excluding the prior term so our results are comparable across models.
-        train_loss = elbo.loss(model, guide, sequences, lengths, include_prior=False)
-        print("training loss = {}".format(train_loss / num_observations))
+        print(f"Stance: {stance}")
+        for i, stance_i in enumerate(["against", "neutral", "favor"]):
+            for j, stance_j in enumerate(["against", "neutral", "favor"]):
+                prob_i_to_j = pyro.param('AutoDelta.probs_x')[i,j]
+                print(f"{stance_i} -> {stance_j}: {prob_i_to_j:.3f}")
 
 
 def main():
