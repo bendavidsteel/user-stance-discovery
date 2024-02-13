@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+from inspect import signature
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -73,15 +74,163 @@ def corrfunc(pairgrid: sns.PairGrid):
         y = data[y_var].values
         x_var_variance = data[f"{x_var} variance"].values
         y_var_variance = data[f"{y_var} variance"].values
-        
+        np.max(x)
         corr, r2, pval = weighted_least_squares(x, x_var_variance, y, y_var_variance)
 
-        # TODO plot the correlation as a line
-        ax.line([np.min(x), np.max(x)], [np.min(x) * corr, np.max(x) * corr], color='r', linestyle='-', linewidth=2)
+        ax.plot([ax.get_xlim()[0], ax.get_xlim()[1]], [ax.get_xlim()[0] * corr, ax.get_xlim()[1] * corr], color='r', linestyle='--', linewidth=2)
 
         ax = ax or plt.gca()
         ax.annotate(f'ρ = {corr:.2f}, p-val = {pval:.2f}', xy=(.1, .9), xycoords=ax.transAxes)
         ax.annotate(f'R² = {r2:.2f}', xy=(.1, .8), xycoords=ax.transAxes)
+
+def map_diag(pairgrid: sns.PairGrid, func, **kwargs):
+    # Add special diagonal axes for the univariate plot
+    if pairgrid.diag_axes is None:
+        diag_vars = []
+        diag_axes = []
+        for i, y_var in enumerate(pairgrid.y_vars):
+            for j, x_var in enumerate(pairgrid.x_vars):
+                if x_var == y_var:
+
+                    # Make the density axes
+                    diag_vars.append(x_var)
+                    ax = pairgrid.axes[i, j]
+                    diag_ax = ax.twinx()
+                    diag_ax.set_axis_off()
+                    diag_axes.append(diag_ax)
+
+                    # Work around matplotlib bug
+                    # https://github.com/matplotlib/matplotlib/issues/15188
+                    if not plt.rcParams.get("ytick.left", True):
+                        for tick in ax.yaxis.majorTicks:
+                            tick.tick1line.set_visible(False)
+
+                    # Remove main y axis from density axes in a corner plot
+                    if pairgrid._corner:
+                        ax.yaxis.set_visible(False)
+                        if pairgrid._despine:
+                            sns.utils.despine(ax=ax, left=True)
+                        # TODO add optional density ticks (on the right)
+                        # when drawing a corner plot?
+
+        if pairgrid.diag_sharey and diag_axes:
+            for ax in diag_axes[1:]:
+                sns._compat.share_axis(diag_axes[0], ax, "y")
+
+        pairgrid.diag_vars = diag_vars
+        pairgrid.diag_axes = diag_axes
+
+    # Loop over diagonal variables and axes, making one plot in each
+    for var, ax in zip(pairgrid.diag_vars, pairgrid.diag_axes):
+
+        plot_kwargs = kwargs.copy()
+        plot_kwargs["ax"] = ax
+
+        vector = pairgrid.data[var]
+        if pairgrid._hue_var is not None:
+            hue = pairgrid.data[pairgrid._hue_var]
+        else:
+            hue = None
+
+        if pairgrid._dropna:
+            not_na = vector.notna()
+            if hue is not None:
+                not_na &= hue.notna()
+            vector = vector[not_na]
+            if hue is not None:
+                hue = hue[not_na]
+
+        plot_kwargs.setdefault("hue", hue)
+        plot_kwargs.setdefault("hue_order", pairgrid._hue_order)
+        plot_kwargs.setdefault("palette", pairgrid._orig_palette)
+        func(var, pairgrid.data, **plot_kwargs)
+        ax.legend_ = None
+
+        if var != pairgrid.diag_vars[-1]:
+            ax.set_xticklabels([])
+
+        if var != pairgrid.diag_vars[0]:
+            ax.set_yticklabels([])
+
+    pairgrid._add_axis_labels()
+    return pairgrid
+
+def map_lower(pairgrid, func, **kwargs):
+    indices = zip(*np.tril_indices_from(pairgrid.axes, -1))
+
+    kws = kwargs.copy()  # Use copy as we insert other kwargs
+    for i, j in indices:
+        x_var = pairgrid.x_vars[j]
+        y_var = pairgrid.y_vars[i]
+        ax = pairgrid.axes[i, j]
+        if ax is None:  # i.e. we are in corner mode
+            continue
+
+        kwargs = kwargs.copy()
+        kwargs["ax"] = ax
+
+        if x_var == y_var:
+            axes_vars = [x_var]
+        else:
+            axes_vars = [x_var, y_var]
+
+        if pairgrid._hue_var is not None and pairgrid._hue_var not in axes_vars:
+            axes_vars.append(pairgrid._hue_var)
+
+        data = pairgrid.data[axes_vars]
+        if pairgrid._dropna:
+            data = data.dropna()
+
+        if pairgrid._hue_var is None:
+            hue = None
+        else:
+            hue = data.get(pairgrid._hue_var)
+
+        if "hue" not in kwargs:
+            kwargs.update({
+                "hue": hue, "hue_order": pairgrid._hue_order, "palette": pairgrid._orig_palette,
+            })
+        func(x_var, y_var, pairgrid.data, **kwargs)
+
+        pairgrid._update_legend_data(ax)
+
+        if i != pairgrid.axes.shape[0] - 1:
+            ax.set_xticklabels([-1, 0, 1])
+
+        if j != 0:
+            ax.set_yticklabels([-1, 0, 1])
+
+    pairgrid._add_axis_labels()
+
+def plot_beta(var, data, **kws):
+    x = np.linspace(0, 1, 100)
+    y = np.zeros_like(x)
+    for i in range(data.shape[0]):
+        alpha, beta = data[f"{var} beta alpha"].values[i], data[f"{var} beta beta"].values[i]
+        y += scipy.stats.beta.pdf(x, alpha, beta) / data.shape[0]
+
+    ax = kws['ax']
+    ax.plot(np.linspace(-1, 1, 100), y, color='r')
+    ax.set_xlim(-1, 1)
+
+def sum_bivariate_betas(x_var, y_var, data, **kws):
+    x = np.linspace(0, 1, 100)
+    pdf = np.zeros((100, 100))
+    for i in range(data.shape[0]):
+        x_alpha, x_beta = data[f"{x_var} beta alpha"].values[i], data[f"{x_var} beta beta"].values[i]
+        y_alpha, y_beta = data[f"{y_var} beta alpha"].values[i], data[f"{y_var} beta beta"].values[i]
+        x_pdf = scipy.stats.beta.pdf(x, x_alpha, x_beta)
+        y_pdf = scipy.stats.beta.pdf(x, y_alpha, y_beta)
+        pdf += np.outer(x_pdf, y_pdf) / data.shape[0]
+
+    ax = kws['ax']
+    ax.matshow(pdf, cmap='viridis', extent=[-1, 1, -1, 1], origin='lower')
+    ax.set_xlim(-1, 1)
+    ax.set_ylim(-1, 1)
+    ax.set_xticks([-1, 0, 1])
+    ax.set_yticks([-1, 0, 1])
+    ax.set_xticklabels([-1, 0, 1])
+    ax.set_yticklabels([-1, 0, 1])
 
 def get_gradient(x):
     x_grad = np.gradient(x)
@@ -181,17 +330,21 @@ def sum_multi_gaussians(opinion_means, opinion_variances, num_bins):
     prob_density /= np.sum(prob_density)
     return prob_density
 
-def plot_pairplot(opinion_means, opinion_variances, users, pretty_stances, fig_path, subreddit, num_bins=25):
+def plot_pairplot(opinion_means, opinion_variances, opinion_beta, users, pretty_stances, fig_path, subreddit, num_bins=25):
     opinion_confidence = np.exp(-np.nanmean(opinion_variances[0], axis=1))
-    user_opinion_df = pd.DataFrame(np.concatenate([opinion_means[0], opinion_variances[0]], axis=1), columns=pretty_stances + [f"{stance} variance" for stance in pretty_stances])
+    
+    user_opinion_df = pd.DataFrame(
+        np.concatenate([opinion_means[0], opinion_variances[0], opinion_beta[0,:,:,0], opinion_beta[0,:,:,1]], axis=1), 
+        columns=pretty_stances + [f"{stance} variance" for stance in pretty_stances] + [f"{stance} beta alpha" for stance in pretty_stances] + [f"{stance} beta beta" for stance in pretty_stances]
+    )
     user_opinion_df[users.columns] = users
     if subreddit != 'all':
         user_opinion_df = user_opinion_df[user_opinion_df['subreddit'] == subreddit]
     g = sns.PairGrid(user_opinion_df, vars=pretty_stances, dropna=True)
-    g.map_diag(sum_betas)
+    map_diag(g, plot_beta)
     g.map_upper(sns.scatterplot)
     g.apply(corrfunc)
-    g.map_lower(sum_bivariate_betas)
+    map_lower(g, sum_bivariate_betas)
     g.savefig(os.path.join(fig_path, "opinion_pairplot.png" if subreddit == 'all' else f"opinion_pairplot_{subreddit}.png"))
 
     if False:
@@ -414,7 +567,7 @@ def calc_polarization(opinion_means, dataset, fig_path, ends):
         top_polarization = np.sort(asymm_polarizations)[-5:]
         top_polarization_indices = np.argsort(asymm_polarizations)[-5:]
         top_partitions = [partitions[i] for i in top_polarization_indices]
-        for i in range(4, -1, -1):
+        for i in range(min(len(dataset.stance_columns)-1, 4), -1, -1):
             partition = top_partitions[i]
             partition_str = ", ".join([dataset.stance_columns[j].replace('stance_', '').replace('_', ' ').title() for j in partition])
             print(f"Partition {i+1}: {partition_str}, Asymmetric Polarization: {top_polarization[i]}")
@@ -423,7 +576,7 @@ def calc_polarization(opinion_means, dataset, fig_path, ends):
         top_polarization = np.sort(asymm_polarizations)[:5]
         top_polarization_indices = np.argsort(asymm_polarizations)[:5]
         top_partitions = [partitions[i] for i in top_polarization_indices]
-        for i in range(5):
+        for i in range(min(len(dataset.stance_columns)-1, 5)):
             partition = top_partitions[i]
             partition_str = ", ".join([dataset.stance_columns[j].replace('stance_', '').replace('_', ' ').title() for j in partition])
             print(f"Partition {i+1}: {partition_str}, Asymmetric Polarization: {top_polarization[i]}")
@@ -473,18 +626,22 @@ def main():
             ends = [max_time_step]
 
     elif dataset_name == "generative":
-        num_people = 1000
-        max_time_step = 1000
+        num_people = 100
         num_opinions = 3
+        num_data_points = 100
+        user_stance = np.tile(np.random.uniform(-1, 1, (num_people, num_opinions, 1)), num_data_points)
+        user_stance_variance = np.tile(np.random.uniform(0, 0.1, (num_people, num_opinions, 1)), num_data_points)
         fig_path = os.path.join(root_dir_path, "figs", "generative")
-        dataset = opinion_datasets.GenerativeOpinionTimelineDataset(num_people=num_people, max_time_step=max_time_step, num_opinions=num_opinions, aggregation=aggregation)
+        dataset = opinion_datasets.SimpleGenerativeOpinionTimelineDataset(user_stance, user_stance_variance, num_data_points, pred_profile_type='low_recall', aggregation=aggregation)
 
         starts = [0]
-        ends = [max_time_step]
+        ends = [num_data_points]
 
     num_people = dataset.num_people
 
     opinion_stats, users = dataset.get_data(start=starts, end=ends)
+    dataset.aggregation = "inferred_beta"
+    opinion_stats_beta, users = dataset.get_data(start=starts, end=ends)
 
     # TODO plot histogram as sum of beta distributions
     # use weighted mean for scatter graphs
@@ -503,9 +660,10 @@ def main():
         if aggregation != "inferred_categorical":
             num_bins = 25
             opinion_means, opinion_variances = opinion_stats
-            plot_pairplot(opinion_means, opinion_variances, users, pretty_stances, fig_path, 'all', num_bins)
+            opinion_beta = opinion_stats_beta[0]
+            plot_pairplot(opinion_means, opinion_variances, opinion_beta, users, pretty_stances, fig_path, 'all', num_bins)
             for subreddit in subreddits:
-                plot_pairplot(opinion_means, opinion_variances, users, pretty_stances, fig_path, subreddit, num_bins)
+                plot_pairplot(opinion_means, opinion_variances, opinion_beta, users, pretty_stances, fig_path, subreddit, num_bins)
         elif aggregation == "inferred_categorical":
             opinion_categorical = opinion_stats[0]
             plot_pairplot_categorical(opinion_categorical, users, pretty_stances, fig_path, 'all')

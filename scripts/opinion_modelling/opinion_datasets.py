@@ -240,6 +240,9 @@ class OpinionTimelineDataset:
             elif self.aggregation == "inferred_categorical":
                 opinion_categorical = estimate.get_inferred_categorical(self, opinion_sequences, classifier_indices)
                 return (opinion_categorical,), self.users
+            elif self.aggregation == "inferred_beta":
+                opinion_beta = estimate.get_inferred_beta(self, opinion_sequences, classifier_indices)
+                return (opinion_beta,), self.users
             elif self.aggregation == "weighted_exponential_smoothing":
                 days_past = np.full((len(self.users), max_content), np.nan)
                 for i, user_id in enumerate(self.users['user_id']):
@@ -253,8 +256,10 @@ class OpinionTimelineDataset:
 
                 opinion_means, opinion_variances = self._weighted_exponential_smoothing(opinion_sequences, days_past, classifier_indices)
                 return (opinion_means, opinion_variances), self.users
-            else:
+            elif self.aggregation is None:
                 return opinion_sequences, self.users, classifier_indices
+            else:
+                raise ValueError("Invalid args")
             
         elif hasattr(start, '__iter__') and hasattr(end, '__iter__'):
             assert len(start) == len(end), "start and end must be the same length"
@@ -265,6 +270,8 @@ class OpinionTimelineDataset:
                 precision_weights = None
             elif self.aggregation == "inferred_categorical":
                 opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions, 3))
+            elif self.aggregation == "inferred_beta":
+                opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions, 2))
             else:
                 raise ValueError("Invalid args")
 
@@ -304,10 +311,14 @@ class OpinionTimelineDataset:
                     opinion_timeline_var[idx] = opinion_variances
                 elif self.aggregation == "inferred_categorical":
                     opinion_timeline[idx] = estimate.get_inferred_categorical(self, opinion_sequences, classifier_indices)
+                elif self.aggregation == "inferred_beta":
+                    opinion_timeline[idx] = estimate.get_inferred_beta(self, opinion_sequences, classifier_indices)
 
             if self.aggregation in ["weighted_mean", "weighted_exponential_smoothing"]:
                 return (opinion_timeline, opinion_timeline_var), self.users
             elif self.aggregation == "inferred_categorical":
+                return (opinion_timeline,), self.users
+            elif self.aggregation == "inferred_beta":
                 return (opinion_timeline,), self.users
         else:
             raise ValueError("Invalid args")
@@ -459,8 +470,12 @@ class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
 
 class SimpleGenerativeOpinionTimelineDataset(OpinionTimelineDataset):
     def __init__(self, user_stance, user_stance_variance, num_data_points, pred_profile_type='perfect', **kwargs):
-        num_opinions = 1
-        stance = 'stance_0'
+        if user_stance.ndim == 3:
+            num_opinions = user_stance.shape[1]
+            stances = [f'stance_{i}' for i in range(num_opinions)]
+        else:
+            num_opinions = 1
+            stances = ['stance_0']
         comment_id = 0
 
         comment_data = []
@@ -469,11 +484,18 @@ class SimpleGenerativeOpinionTimelineDataset(OpinionTimelineDataset):
             for i in range(num_data_points):
                 if isinstance(user_stance, float):
                     comment_stance = np.random.normal(user_stance, user_stance_variance)
+                    stance = stances[0]
                 elif isinstance(user_stance, np.ndarray):
                     if user_stance.ndim == 1:
                         comment_stance = np.random.normal(user_stance[i], user_stance_variance)
+                        stance = stances[0]
                     elif user_stance.ndim == 2:
                         comment_stance = np.random.normal(user_stance[j, i], user_stance_variance)
+                        stance = stances[0]
+                    elif user_stance.ndim == 3:
+                        stance_idx = np.random.choice(num_opinions)
+                        comment_stance = np.random.normal(user_stance[j, stance_idx, i], user_stance_variance[j, stance_idx, i])
+                        stance = stances[stance_idx]
                 comment_stance = np.clip(comment_stance, -1, 1)
                 quantized_comment_stance = 0
                 if comment_stance > 1/3:
@@ -493,84 +515,84 @@ class SimpleGenerativeOpinionTimelineDataset(OpinionTimelineDataset):
                 })
                 comment_id += 1
         comments_df = pd.DataFrame(comment_data)
-
-        stance_columns = [stance]
+        stance_columns = stances
 
         all_classifier_profiles = {}
-        all_classifier_profiles[stance] = {}
+        for stance in stance_columns:
+            all_classifier_profiles[stance] = {}
 
-        if pred_profile_type == 'perfect':
-            profile = {
-                'true_favor': {
-                    'predicted_favor': 1,
-                    'predicted_against': 0,
-                    'predicted_neutral': 0,
-                },
-                'true_against': {
-                    'predicted_favor': 0,
-                    'predicted_against': 1,
-                    'predicted_neutral': 0,
-                },
-                'true_neutral': {
-                    'predicted_favor': 0,
-                    'predicted_against': 0,
-                    'predicted_neutral': 1,
-                },
-            }
-        elif pred_profile_type == 'low_precision':
-            profile = {
-                'true_favor': {
-                    'predicted_favor': 10,
-                    'predicted_against': 1,
-                    'predicted_neutral': 7,
-                },
-                'true_against': {
-                    'predicted_favor': 1,
-                    'predicted_against': 9,
-                    'predicted_neutral': 6,
-                },
-                'true_neutral': {
-                    'predicted_favor': 7,
-                    'predicted_against': 6,
-                    'predicted_neutral': 20,
-                },
-            }
-        elif pred_profile_type == 'low_recall':
-            profile = {
-                'true_favor': {
-                    'predicted_favor': 7,
-                    'predicted_against': 0,
-                    'predicted_neutral': 10,
-                },
-                'true_against': {
-                    'predicted_favor': 1,
-                    'predicted_against': 8,
-                    'predicted_neutral': 12,
-                },
-                'true_neutral': {
-                    'predicted_favor': 3,
-                    'predicted_against': 2,
-                    'predicted_neutral': 20,
-                },
-            }
+            if pred_profile_type == 'perfect':
+                profile = {
+                    'true_favor': {
+                        'predicted_favor': 1,
+                        'predicted_against': 0,
+                        'predicted_neutral': 0,
+                    },
+                    'true_against': {
+                        'predicted_favor': 0,
+                        'predicted_against': 1,
+                        'predicted_neutral': 0,
+                    },
+                    'true_neutral': {
+                        'predicted_favor': 0,
+                        'predicted_against': 0,
+                        'predicted_neutral': 1,
+                    },
+                }
+            elif pred_profile_type == 'low_precision':
+                profile = {
+                    'true_favor': {
+                        'predicted_favor': 10,
+                        'predicted_against': 1,
+                        'predicted_neutral': 7,
+                    },
+                    'true_against': {
+                        'predicted_favor': 1,
+                        'predicted_against': 9,
+                        'predicted_neutral': 6,
+                    },
+                    'true_neutral': {
+                        'predicted_favor': 7,
+                        'predicted_against': 6,
+                        'predicted_neutral': 20,
+                    },
+                }
+            elif pred_profile_type == 'low_recall':
+                profile = {
+                    'true_favor': {
+                        'predicted_favor': 7,
+                        'predicted_against': 0,
+                        'predicted_neutral': 10,
+                    },
+                    'true_against': {
+                        'predicted_favor': 1,
+                        'predicted_against': 8,
+                        'predicted_neutral': 12,
+                    },
+                    'true_neutral': {
+                        'predicted_favor': 3,
+                        'predicted_against': 2,
+                        'predicted_neutral': 20,
+                    },
+                }
 
-        profile['favor'] = {}
-        profile['favor']['precision'] = profile['true_favor']['predicted_favor'] / (profile['true_favor']['predicted_favor'] + profile['true_against']['predicted_favor'] + profile['true_neutral']['predicted_favor'])
-        profile['favor']['recall'] = profile['true_favor']['predicted_favor'] / (profile['true_favor']['predicted_favor'] + profile['true_favor']['predicted_against'] + profile['true_favor']['predicted_neutral'])
+            profile['favor'] = {}
+            profile['favor']['precision'] = profile['true_favor']['predicted_favor'] / (profile['true_favor']['predicted_favor'] + profile['true_against']['predicted_favor'] + profile['true_neutral']['predicted_favor'])
+            profile['favor']['recall'] = profile['true_favor']['predicted_favor'] / (profile['true_favor']['predicted_favor'] + profile['true_favor']['predicted_against'] + profile['true_favor']['predicted_neutral'])
 
-        profile['against'] = {}
-        profile['against']['precision'] = profile['true_against']['predicted_against'] / (profile['true_favor']['predicted_against'] + profile['true_against']['predicted_against'] + profile['true_neutral']['predicted_against'])
-        profile['against']['recall'] = profile['true_against']['predicted_against'] / (profile['true_against']['predicted_favor'] + profile['true_against']['predicted_against'] + profile['true_against']['predicted_neutral'])
+            profile['against'] = {}
+            profile['against']['precision'] = profile['true_against']['predicted_against'] / (profile['true_favor']['predicted_against'] + profile['true_against']['predicted_against'] + profile['true_neutral']['predicted_against'])
+            profile['against']['recall'] = profile['true_against']['predicted_against'] / (profile['true_against']['predicted_favor'] + profile['true_against']['predicted_against'] + profile['true_against']['predicted_neutral'])
 
-        profile['neutral'] = {}
-        profile['neutral']['precision'] = profile['true_neutral']['predicted_neutral'] / (profile['true_favor']['predicted_neutral'] + profile['true_against']['predicted_neutral'] + profile['true_neutral']['predicted_neutral'])
-        profile['neutral']['recall'] = profile['true_neutral']['predicted_neutral'] / (profile['true_neutral']['predicted_favor'] + profile['true_neutral']['predicted_against'] + profile['true_neutral']['predicted_neutral'])
+            profile['neutral'] = {}
+            profile['neutral']['precision'] = profile['true_neutral']['predicted_neutral'] / (profile['true_favor']['predicted_neutral'] + profile['true_against']['predicted_neutral'] + profile['true_neutral']['predicted_neutral'])
+            profile['neutral']['recall'] = profile['true_neutral']['predicted_neutral'] / (profile['true_neutral']['predicted_favor'] + profile['true_neutral']['predicted_against'] + profile['true_neutral']['predicted_neutral'])
 
-        profile['macro'] = {}
-        profile['macro']['precision'] = (profile['favor']['precision'] + profile['against']['precision']) / 2
-        profile['macro']['recall'] = (profile['favor']['recall'] + profile['against']['recall']) / 2
+            profile['macro'] = {}
+            profile['macro']['precision'] = (profile['favor']['precision'] + profile['against']['precision']) / 2
+            profile['macro']['recall'] = (profile['favor']['recall'] + profile['against']['recall']) / 2
 
-        all_classifier_profiles[stance][0] = profile
+            all_classifier_profiles[stance][0] = profile
 
         super().__init__(comments_df, stance_columns, all_classifier_profiles, **kwargs)
 

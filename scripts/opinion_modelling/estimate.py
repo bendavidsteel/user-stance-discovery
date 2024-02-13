@@ -213,9 +213,8 @@ class StanceEstimation:
 
 
     def categorical_model(self, opinion_sequences, predictor_ids, mask):
+        user_stance = pyro.param("user_stance", torch.tensor([1/3, 1/3, 1/3]).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=dist.constraints.simplex)
         with pyro.plate("batched_data", opinion_sequences.shape[0], dim=-2):
-            user_stance = pyro.param("user_stance", torch.tensor([1/3, 1/3, 1/3]).unsqueeze(0).tile((opinion_sequences.shape[0],1)), constraint=dist.constraints.simplex)
-
             # loop over the observed data
             with pyro.plate("observed_data_sequence", opinion_sequences.shape[1], dim=-1):
                 with poutine.mask(mask=mask):
@@ -302,6 +301,64 @@ def get_inferred_categorical(dataset, opinion_sequences, all_classifier_indices)
         # grab the learned variational parameters
         user_stance = pyro.param("user_stance").detach().numpy()
         user_stances[:, stance_idx] = user_stance
+
+    return user_stances
+
+def get_inferred_beta(dataset, opinion_sequences, all_classifier_indices):
+    estimator = StanceEstimation(dataset.all_classifier_profiles)
+
+    user_stances = np.zeros((opinion_sequences.shape[0], len(dataset.stance_columns), 2))
+
+    # setup the optimizer
+    adam_params = {"lr": 0.001}
+    optimizer = Adam(adam_params)
+    # for user_idx in range(opinion_sequences.shape[0]):
+    for stance_idx, stance_column in enumerate(dataset.stance_columns):
+
+        op_seqs = []
+        lengths = []
+        all_predictor_ids = []
+        for user_idx in range(opinion_sequences.shape[0]):
+            seq = []
+            length = 0
+            predictor_ids = []
+            for i in range(opinion_sequences.shape[1]):
+                if not np.isnan(opinion_sequences[user_idx, i, stance_idx]):
+                    seq.append(opinion_sequences[user_idx, i, stance_idx])
+                    length += 1
+                    predictor_ids.append(all_classifier_indices[user_idx, i].astype(int))
+
+            op_seqs.append(np.array(seq))
+            lengths.append(length)
+            all_predictor_ids.append(np.array(predictor_ids))
+
+        max_length = max(lengths)
+
+        stance_opinion_sequences = np.zeros((opinion_sequences.shape[0], max_length))
+        classifier_indices = np.zeros((opinion_sequences.shape[0], max_length))
+        mask = np.zeros((opinion_sequences.shape[0], max_length))
+        for i in range(opinion_sequences.shape[0]):
+            stance_opinion_sequences[i, :lengths[i]] = op_seqs[i]
+            classifier_indices[i, :lengths[i]] = all_predictor_ids[i]
+            mask[i, :lengths[i]] = 1
+
+        if stance_column not in estimator.predictor_confusion_probs or len(estimator.predictor_confusion_probs[stance_column]) == 0:
+            continue
+        estimator.set_stance(stance_column)
+        stance_opinion_sequences = torch.tensor(stance_opinion_sequences).int() + 1
+        classifier_indices = torch.tensor(classifier_indices).int()
+        mask = torch.tensor(mask).bool()
+
+        pyro.clear_param_store()
+        # do gradient steps
+        svi = SVI(estimator.beta_model, estimator.beta_guide, optimizer, loss=Trace_ELBO())
+        n_steps = 1000
+        for step in range(n_steps):
+            svi.step(stance_opinion_sequences, classifier_indices, mask)
+
+        # grab the learned variational parameters
+        user_stances[:, stance_idx, 0] = pyro.param("alpha").detach().numpy().squeeze(-1)
+        user_stances[:, stance_idx, 1] = pyro.param("beta").detach().numpy().squeeze(-1)
 
     return user_stances
 

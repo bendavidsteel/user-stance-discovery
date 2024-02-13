@@ -240,7 +240,7 @@ class SocialGenerativeModel:
         return discrete_positions
 
     def seed_posts(self):
-        self._create_posts(0, 1 / self.num_users)
+        self._create_posts(0, 0.1)
 
     def get_users(self):
         return self.users
@@ -257,7 +257,7 @@ class SocialGenerativeModel:
         return torch.stack([t for t in self.users[attr].values])
 
     def create_posts(self, time_step):
-        self._create_posts(time_step, 1 / (self.num_users * 2))
+        self._create_posts(time_step, 0.05)
 
     def _create_posts(self, time_step, prob_threshold):
         to_post = torch.distributions.Uniform(0., 1.).sample((self.num_users,)) < prob_threshold
@@ -276,7 +276,7 @@ class SocialGenerativeModel:
         ]
 
     def create_comments(self, time_step):
-        return self._create_comments(time_step, 1 / (self.num_users * 2))
+        return self._create_comments(time_step, 0.05)
 
     def _create_comments(self, time_step, prob_threshold):
         users_pos = self.get_users_positions()

@@ -164,7 +164,7 @@ def fit_hmm(dataset):
             for j, stance_j in enumerate(["against", "neutral", "favor"]):
                 print(f"{stance_i} -> {stance_j}: {torch.exp(model.edges[i, j]):.3f}")
 
-def pyro_hmm(dataset):
+def pyro_hmm(dataset, root_dir_path):
     import pyro
     import pyro.distributions as dist
     from pyro import poutine
@@ -222,8 +222,9 @@ def pyro_hmm(dataset):
     dataset.aggregation = None
     opinion_sequences, users, classifier_indices = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
 
-    dataset.aggregation = "categorical"
-    opinion_categoricals, users = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
+    dataset.aggregation = "inferred_categorical"
+    opinion_stats, users = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
+    opinion_categoricals = opinion_stats[0]
 
     estimator = estimate.StanceEstimation(dataset.all_classifier_profiles)
 
@@ -261,7 +262,17 @@ def pyro_hmm(dataset):
         num_observations = float(lengths.sum())
 
         # TODO find 33 percentile options, to use as emission_probs
-        emission_probs = opinion_categoricals
+        stance_categoricals = opinion_categoricals[:, stance_idx, :]
+        emission_probs = torch.tensor([[0.4, 0.4, 0.2], [0.3, 0.4, 0.3], [0.2, 0.4, 0.4]]).to(device)
+        # how many categoricals fall into these categories?
+        num_extreme_against = len(np.where(stance_categoricals[:, 0] >= emission_probs[0][0].item())[0])
+        num_extreme_neutral = len(np.where(stance_categoricals[:, 1] >= emission_probs[1][1].item())[0])
+        num_extreme_favor = len(np.where(stance_categoricals[:, 2] >= emission_probs[2][2].item())[0])
+        print(f"Stance: {stance}")
+        print(f"Num extreme against: {num_extreme_against}")
+        print(f"Num extreme neutral: {num_extreme_neutral}")
+        print(f"Num extreme favor: {num_extreme_favor}")
+        print(f"Num left over: {len(stance_categoricals) - num_extreme_against - num_extreme_neutral - num_extreme_favor}")
         
         pyro.clear_param_store()
 
@@ -285,10 +296,18 @@ def pyro_hmm(dataset):
 
         # We'll train on small minibatches.
         pbar = tqdm.tqdm(range(num_steps))
+        losses = []
         for step in pbar:
             batch_size = min(batch_size, len(sequences)) if batch_size is not None else None
             loss = svi.step(sequences, classifier_index, lengths, predictor_probs, emission_probs, jit=jit, batch_size=batch_size)
+            losses.append(loss)
             pbar.set_description(f"loss: {loss / num_observations:.4f}")
+
+        # Plot the loss curve.
+        fig, ax = plt.subplots()
+        ax.plot(losses)
+        ax.set(xlabel="Step", ylabel="Loss")
+        fig.savefig(os.path.join(root_dir_path, "figs", "hmm", f"{stance}_loss.png"))
 
         print(f"Stance: {stance}")
         for i, stance_i in enumerate(["against", "neutral", "favor"]):
@@ -318,7 +337,7 @@ def main():
 
     do_hmm = True
     if do_hmm:
-        pyro_hmm(dataset)
+        pyro_hmm(dataset, root_dir_path)
 
 if __name__ == "__main__":
     main()
