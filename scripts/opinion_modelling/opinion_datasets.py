@@ -171,7 +171,17 @@ class RedditInteractionDataset(SocialInteractionDataset):
 
 
 class OpinionTimelineDataset:
-    def __init__(self, comment_df, stance_columns, all_classifier_profiles, user_mode_attrs=None, aggregation=None, halflife=50.0, min_num_per_stance=None):
+    def __init__(
+            self, 
+            comment_df, 
+            stance_columns, 
+            all_classifier_profiles, 
+            user_mode_attrs=None, 
+            aggregation=None, 
+            halflife=50.0, 
+            min_num_per_stance=None,
+            subsample_users=None
+        ):
         assert len(comment_df) > 0, "comment_df must not be empty"
         assert 'createtime' in comment_df.columns, "createtime column not found"
         assert 'user_id' in comment_df.columns, "user_id column not found"
@@ -203,6 +213,8 @@ class OpinionTimelineDataset:
         self.min_time_step = self.comment_df['createtime'].min()
         self.max_time_step = self.comment_df['createtime'].max()
         self.users = self.comment_df['user_id'].to_frame().drop_duplicates().reset_index(drop=True)
+        self.subsample_users = subsample_users
+        self.users = self.users.sample(n=self.subsample_users) if self.subsample_users is not None else self.users
 
         if user_mode_attrs is not None:
             self.users = self.users.merge(self.comment_df.groupby('user_id')[user_mode_attrs].agg(lambda x: pd.Series.mode(x)[0]).reset_index(), on='user_id')
@@ -243,6 +255,9 @@ class OpinionTimelineDataset:
             elif self.aggregation == "inferred_beta":
                 opinion_beta = estimate.get_inferred_beta(self, opinion_sequences, classifier_indices)
                 return (opinion_beta,), self.users
+            elif self.aggregation == "inferred_normal":
+                opinion_normal, opinion_var = estimate.get_inferred_normal(self, opinion_sequences, classifier_indices)
+                return (opinion_normal,opinion_var), self.users
             elif self.aggregation == "weighted_exponential_smoothing":
                 days_past = np.full((len(self.users), max_content), np.nan)
                 for i, user_id in enumerate(self.users['user_id']):
@@ -272,6 +287,9 @@ class OpinionTimelineDataset:
                 opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions, 3))
             elif self.aggregation == "inferred_beta":
                 opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions, 2))
+            elif self.aggregation == "inferred_normal":
+                opinion_timeline = np.zeros((len(end), len(self.users), self.num_opinions))
+                opinion_timeline_var = np.zeros((len(end), len(self.users), self.num_opinions))
             else:
                 raise ValueError("Invalid args")
 
@@ -313,6 +331,10 @@ class OpinionTimelineDataset:
                     opinion_timeline[idx] = estimate.get_inferred_categorical(self, opinion_sequences, classifier_indices)
                 elif self.aggregation == "inferred_beta":
                     opinion_timeline[idx] = estimate.get_inferred_beta(self, opinion_sequences, classifier_indices)
+                elif self.aggregation == "inferred_normal":
+                    mean, variance = estimate.get_inferred_normal(self, opinion_sequences, classifier_indices)
+                    opinion_timeline[idx] = mean
+                    opinion_timeline_var[idx] = variance
 
             if self.aggregation in ["weighted_mean", "weighted_exponential_smoothing"]:
                 return (opinion_timeline, opinion_timeline_var), self.users
@@ -320,6 +342,10 @@ class OpinionTimelineDataset:
                 return (opinion_timeline,), self.users
             elif self.aggregation == "inferred_beta":
                 return (opinion_timeline,), self.users
+            elif self.aggregation == "inferred_normal":
+                return (opinion_timeline, opinion_timeline_var), self.users
+            else:
+                raise ValueError("Invalid args")
         else:
             raise ValueError("Invalid args")
 
@@ -470,7 +496,7 @@ class GenerativeOpinionTimelineDataset(OpinionTimelineDataset):
 
 class SimpleGenerativeOpinionTimelineDataset(OpinionTimelineDataset):
     def __init__(self, user_stance, user_stance_variance, num_data_points, pred_profile_type='perfect', **kwargs):
-        if user_stance.ndim == 3:
+        if not isinstance(user_stance, float) and user_stance.ndim == 3:
             num_opinions = user_stance.shape[1]
             stances = [f'stance_{i}' for i in range(num_opinions)]
         else:

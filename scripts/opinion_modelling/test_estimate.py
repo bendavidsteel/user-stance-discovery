@@ -34,9 +34,14 @@ def get_error(user_stance, user_stance_variance, num_data_points, predict_profil
                 return pyro.param("user_stance_loc_q").detach().numpy(), pyro.param("user_stance_var_q").detach().numpy()
     elif model_type == "beta":
         model = estimator.beta_model
+        # guide = pyro.infer.autoguide.AutoDelta(model)
         guide = estimator.beta_guide
         def get_predicted_stats():
-            return pyro.param("alpha").detach().numpy(), pyro.param("beta").detach().numpy()
+            if mle:
+                return pyro.param("alpha").detach().numpy(), pyro.param("beta").detach().numpy()
+            else:
+                return pyro.param("alpha_d").detach().numpy(), pyro.param("beta_d").detach().numpy()
+                # return pyro.param('AutoDelta.alpha').detach().numpy(), pyro.param('AutoDelta.beta').detach().numpy()
         
     elif model_type == "categorical":
         model = estimator.categorical_model
@@ -49,8 +54,8 @@ def get_error(user_stance, user_stance_variance, num_data_points, predict_profil
     pyro.get_param_store().clear()
     if method == "SVI":
         num_steps = 1000
-        gamma = 0.5  # final learning rate will be gamma * initial_lr
-        initial_lr = 0.01
+        gamma = 0.01  # final learning rate will be gamma * initial_lr
+        initial_lr = 0.1
         lrd = gamma ** (1 / num_steps)
         optim = pyro.optim.ClippedAdam({'lr': initial_lr, 'lrd': lrd})
         svi = SVI(model, guide, optim, loss=Trace_ELBO())
@@ -88,7 +93,7 @@ def plot_experiment(user_stance_variance, num_data_points, predict_profile, mode
     # predicted_variances = []
     # freq_stances = []
     # freq_variances = []
-    user_stances = np.arange(-1, 1, 0.1)
+    user_stances = np.linspace(-1, 1, 10)
     user_stances = np.tile(np.expand_dims(user_stances, -1), num_data_points)
     # for user_stance in tqdm.tqdm(np.arange(-1, 1, 0.1)):
     predicted_stats, _, _, freq_stances, freq_variances, precision, recall = get_error(user_stances, user_stance_variance, num_data_points, predict_profile=predict_profile, model_type=model_type, method=method, mle=mle)
@@ -98,14 +103,16 @@ def plot_experiment(user_stance_variance, num_data_points, predict_profile, mode
         # freq_stances.append(freq_mean)
         # freq_variances.append(freq_var)
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(6, 4))
     user_stances = user_stances[:,0]
-    ax.plot(user_stances, user_stances, label="True stance")
+    gap = 0.02
+    ax.errorbar(user_stances - gap, user_stances, yerr=user_stance_variance, label="True stance", fmt="o")
     if model_type == "normal":
         predicted_stances = predicted_stats[0]
         predicted_variances = predicted_stats[1]
-        ax.errorbar(user_stances + 0.005, predicted_stances[:,0], yerr=predicted_variances[:,0], label="Predicted stance")
-        ax.errorbar(user_stances - 0.005, freq_stances, yerr=freq_variances, label="Frequentist stance")
+        
+        ax.errorbar(user_stances + gap, predicted_stances[:,0], yerr=predicted_variances[:,0], label="Inferred stance", fmt="o")
+        ax.errorbar(user_stances, freq_stances, yerr=freq_variances, label="Weighted stance", fmt="o")
     elif model_type == "beta":
         predicted_stats = list(zip(*[x[:,0] for x in predicted_stats]))
         use_mean = True
@@ -129,7 +136,7 @@ def plot_experiment(user_stance_variance, num_data_points, predict_profile, mode
         ax.matshow(np.array(predicted_stances).T, extent=[-1, 1, 1, -1], aspect='auto', vmin=0, vmax=1, alpha=0.5)
         ax.errorbar(user_stances, freq_stances, yerr=freq_variances, label="Frequentist stance")
     
-    ax.set_title(fig_title.format(user_stance_variance=user_stance_variance, num_data_points=num_data_points, precision=precision, recall=recall))
+    # ax.set_title(fig_title.format(user_stance_variance=user_stance_variance, num_data_points=num_data_points, precision=precision, recall=recall))
     ax.set_xlabel("True stance")
     ax.set_ylabel("Predicted stance")
     ax.legend()
@@ -140,8 +147,8 @@ def main():
     root_dir_path = os.path.join(this_dir_path, "..", "..")
     figs_dir_path = os.path.join(root_dir_path, "figs", "estimate")
     
-    model_type = "beta"
-    mle = True
+    model_type = "normal"
+    mle = False
     method = "SVI"
 
     # plot loss
@@ -156,7 +163,7 @@ def main():
     if model_type == "normal":
         predicted_stances = [x[0][0][0] for x in learned_stats]
         predicted_variances = [x[1][0][0] for x in learned_stats]
-        ax1.errorbar(np.linspace(0, 1000, len(predicted_stances)), predicted_stances, yerr=predicted_variances, label="Predicted stance")
+        ax1.errorbar(np.linspace(0, len(losses), len(predicted_stances)), predicted_stances, yerr=predicted_variances, label="Predicted stance")
     elif model_type == "beta":
         # for i in range(len(learned_stats)):
         #     num_points = 100

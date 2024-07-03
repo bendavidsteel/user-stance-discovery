@@ -108,14 +108,14 @@ def main():
     train_num = 10
     val_num = 10
     dataset_strategy = 'order'
-    tune_general = True
+    tune_general = False
     if not use_baseline:
         model_name = 'berkeley-nest/Starling-LM-7B-alpha'
         # model_name = 'mistralai/Mistral-7B-v0.1'
         model_prompt_template = "GPT4 Correct User: {prompt}<|end_of_turn|>GPT4 Correct Assistant:"
         prompting_method = 'predict'
         opinion_method = 'template'
-        teleprompter = 'multitaskfinetune'
+        teleprompter = 'finetune'
         teleprompter_settings = {}
         classifier = StanceClassifier(model_name=model_name, model_prompt_template=model_prompt_template, prompting_method=prompting_method, opinion_method=opinion_method, backend="dspy", teleprompter=teleprompter)
     else:
@@ -171,14 +171,14 @@ def main():
                 "model_name": classifier.model_name,
                 "prompt_method": classifier.prompting_method,
                 "regex": getattr(classifier, 'regex', None),
-                "comment_prompt": str(classifier._get_prompt_template(True, True)),
-                "submission_prompt": str(classifier._get_prompt_template(False, False)),
+                "comment_prompt": str(classifier._get_prompt_template(True, True)) if not use_baseline else None,
+                "submission_prompt": str(classifier._get_prompt_template(False, False)) if not use_baseline else None,
                 "train_num": train_num,
                 "val_num": val_num,
                 "dataset_strategy": dataset_strategy,
-                "model_prompt_template": classifier.model_prompt_template,
-                "teleprompter": classifier.teleprompter,
-                "extended_prompt": classifier.get_extended_prompt(),
+                "model_prompt_template": classifier.model_prompt_template if not use_baseline else None,
+                "teleprompter": classifier.teleprompter if not use_baseline else None,
+                "extended_prompt": classifier.get_extended_prompt() if not use_baseline else None,
                 "tune_general": tune_general,
             }
         )
@@ -223,7 +223,7 @@ def main():
             stance_datasets[stance_slug] = stance_dataset
 
     general_checkpoint_path = None
-    if "tune" in teleprompter and train_num + val_num > 0 and tune_general:
+    if (not use_baseline) and "tune" in teleprompter and train_num + val_num > 0 and tune_general:
         stances_dataset = StancesDataset(stance_datasets.values())
         trainset = stances_dataset.get_train_data()
         valset = stances_dataset.get_dev_data()
@@ -252,7 +252,7 @@ def main():
                     comment_f1s, comment_precisions, comment_recalls, log_to_wandb, topic_path, train_num, val_num, tune_general, general_checkpoint_path
                 )
 
-                if "tune" in teleprompter and train_num + val_num > 0 and ("multitask" in teleprompter or not tune_general):
+                if (not use_baseline) and "tune" in teleprompter and train_num + val_num > 0 and ("multitask" in teleprompter or not tune_general):
                     classifier.remove_model()
 
     avg_comment_f1 = sum(comment_f1s) / len(comment_f1s)

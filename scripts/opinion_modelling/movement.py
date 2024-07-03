@@ -1,5 +1,6 @@
 import collections
 import datetime
+import json
 import os
 
 import matplotlib.pyplot as plt
@@ -170,7 +171,6 @@ def pyro_hmm(dataset, root_dir_path):
     from pyro import poutine
     from pyro.infer import SVI, JitTraceEnum_ELBO, TraceEnum_ELBO
     from pyro.infer.autoguide import AutoDelta
-    from pyro.optim import Adam
     from pyro.util import ignore_jit_warnings
 
     def model(sequences, classifier_indices, lengths, predictor_probs, emission_probs, num_states=3, jit=True, batch_size=None, include_prior=True):
@@ -179,13 +179,21 @@ def pyro_hmm(dataset, root_dir_path):
             assert lengths.shape == (num_sequences,)
             assert lengths.max() <= max_length
         with poutine.mask(mask=include_prior):
+            # start_probs = pyro.sample(
+            #     "probs_start",
+            #     dist.Dirichlet(torch.tensor([0.5, 0.5])),
+            # )
             start_probs = pyro.sample(
                 "probs_start",
-                dist.Dirichlet(torch.tensor([0.1, 0.8, 0.1])),
+                dist.Dirichlet(torch.tensor([1.0, 10.0, 1.0]))
             )
             probs_x = pyro.sample(
                 "probs_x",
                 dist.Dirichlet(0.9 * torch.eye(num_states) + 0.1).to_event(1),
+            )
+            emission_probs = pyro.sample(
+                "probs_emission",
+                dist.Dirichlet(torch.tensor([[4.0, 3.0, 2.0], [2.5, 4.0, 2.5], [2.0, 3.0, 4.0]])).to_event(1),
             )
 
         # We subsample batch_size items out of num_sequences items.
@@ -222,98 +230,219 @@ def pyro_hmm(dataset, root_dir_path):
     dataset.aggregation = None
     opinion_sequences, users, classifier_indices = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
 
-    dataset.aggregation = "inferred_categorical"
-    opinion_stats, users = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
-    opinion_categoricals = opinion_stats[0]
+    if 'subreddit' in users.columns:
+        subreddits = users['subreddit'].unique()
+    else:
+        subreddits = [None]
+
+    # dataset.aggregation = "inferred_categorical"
+    # opinion_stats, users = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
+    # opinion_categoricals = opinion_stats[0]
 
     estimator = estimate.StanceEstimation(dataset.all_classifier_profiles)
 
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
     pyro.set_rng_seed(42)
 
-    learning_rate = 0.001
-    jit = False
     num_steps = 1000
+    initial_lr = 0.1
+    gamma = 0.1  # final learning rate will be gamma * initial_lr
+    lrd = gamma ** (1 / num_steps)
+    jit = False
     batch_size = None
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     classifier_indices = torch.tensor(classifier_indices).to(device)
 
     for stance_idx, stance in enumerate(dataset.stance_columns):
-        seqs = []
-        c_indices = []
-        for j in range(opinion_sequences.shape[0]):
-            seq = opinion_sequences[j, np.where(~np.isnan(opinion_sequences[j, :, stance_idx]))[0], stance_idx]
-            seq = torch.tensor(seq.astype(int) + 1)
-            if seq.shape[0] > 0:
-                seqs.append(seq)
-                c_indices.append(classifier_indices[j, np.where(~np.isnan(opinion_sequences[j, :, stance_idx]))[0]])
+        for subreddit in subreddits:
 
-        max_length = max([len(seq) for seq in seqs])
-        sequences = torch.zeros((len(seqs), max_length), dtype=torch.int)
-        classifier_index = torch.zeros((len(seqs), max_length), dtype=torch.int)
-        for i, seq in enumerate(seqs):
-            sequences[i, :len(seq)] = seq
-            classifier_index[i, :len(seq)] = c_indices[i]
+            if subreddit:
+                print(f"Subreddit: {subreddit}")
+                fig_dir_path = os.path.join(root_dir_path, "figs", "hmm", subreddit)
+                if not os.path.exists(fig_dir_path):
+                    os.makedirs(fig_dir_path)
+            else:
+                fig_dir_path = os.path.join(root_dir_path, "figs", "hmm")
 
-        sequences = sequences.to(device)
-        lengths = torch.tensor(sequences.shape[1] * np.ones(sequences.shape[0], dtype=int)).to(device)
-        classifier_index = classifier_index.to(device)
-        predictor_probs = estimator.predictor_confusion_probs[stance]['predict_probs'].to(device)
-        num_observations = float(lengths.sum())
+            probs_path = os.path.join(fig_dir_path, f"{stance}_probs.json")
+            if os.path.exists(probs_path):
+                continue
 
-        # TODO find 33 percentile options, to use as emission_probs
-        stance_categoricals = opinion_categoricals[:, stance_idx, :]
-        emission_probs = torch.tensor([[0.4, 0.4, 0.2], [0.3, 0.4, 0.3], [0.2, 0.4, 0.4]]).to(device)
-        # how many categoricals fall into these categories?
-        num_extreme_against = len(np.where(stance_categoricals[:, 0] >= emission_probs[0][0].item())[0])
-        num_extreme_neutral = len(np.where(stance_categoricals[:, 1] >= emission_probs[1][1].item())[0])
-        num_extreme_favor = len(np.where(stance_categoricals[:, 2] >= emission_probs[2][2].item())[0])
-        print(f"Stance: {stance}")
-        print(f"Num extreme against: {num_extreme_against}")
-        print(f"Num extreme neutral: {num_extreme_neutral}")
-        print(f"Num extreme favor: {num_extreme_favor}")
-        print(f"Num left over: {len(stance_categoricals) - num_extreme_against - num_extreme_neutral - num_extreme_favor}")
-        
-        pyro.clear_param_store()
+            seqs = []
+            c_indices = []
+            for j in range(opinion_sequences.shape[0]):
+                if subreddit:
+                    if users['subreddit'][j] != subreddit:
+                        continue
+                seq = opinion_sequences[j, np.where(~np.isnan(opinion_sequences[j, :, stance_idx]))[0], stance_idx]
+                seq = torch.tensor(seq.astype(int) + 1)
+                if seq.shape[0] > 0:
+                    seqs.append(seq)
+                    c_indices.append(classifier_indices[j, np.where(~np.isnan(opinion_sequences[j, :, stance_idx]))[0]])
 
-        # We'll train using MAP Baum-Welch, i.e. MAP estimation while marginalizing
-        # out the hidden state x. This is accomplished via an automatic guide that
-        # learns point estimates of all of our conditional probability tables,
-        # named probs_*.
-        guide = AutoDelta(
-            poutine.block(model, expose_fn=lambda msg: msg["name"].startswith("probs_"))
-        )
+            if len(seqs) == 0:
+                continue
 
-        # Enumeration requires a TraceEnum elbo and declaring the max_plate_nesting.
-        # All of our models have one plate: "data".
-        optim = Adam({"lr": learning_rate})
-        elbo = JitTraceEnum_ELBO if jit else TraceEnum_ELBO
-        elbo = elbo(
-            max_plate_nesting=1 if model.__name__ == 'model_0' else 1,
-            strict_enumeration_warning=(True),
-        )
-        svi = SVI(model, guide, optim, elbo)
+            max_length = max([len(seq) for seq in seqs])
+            sequences = torch.zeros((len(seqs), max_length), dtype=torch.int)
+            classifier_index = torch.zeros((len(seqs), max_length), dtype=torch.int)
+            for i, seq in enumerate(seqs):
+                sequences[i, :len(seq)] = seq
+                classifier_index[i, :len(seq)] = c_indices[i]
 
-        # We'll train on small minibatches.
-        pbar = tqdm.tqdm(range(num_steps))
-        losses = []
-        for step in pbar:
-            batch_size = min(batch_size, len(sequences)) if batch_size is not None else None
-            loss = svi.step(sequences, classifier_index, lengths, predictor_probs, emission_probs, jit=jit, batch_size=batch_size)
-            losses.append(loss)
-            pbar.set_description(f"loss: {loss / num_observations:.4f}")
+            sequences = sequences.to(device)
+            lengths = torch.tensor([len(seq) for seq in seqs]).to(device)
+            classifier_index = classifier_index.to(device)
+            predictor_probs = estimator.predictor_confusion_probs[stance]['predict_probs'].to(device)
+            num_observations = float(lengths.sum())
 
-        # Plot the loss curve.
-        fig, ax = plt.subplots()
-        ax.plot(losses)
-        ax.set(xlabel="Step", ylabel="Loss")
-        fig.savefig(os.path.join(root_dir_path, "figs", "hmm", f"{stance}_loss.png"))
+            num_states = 3
 
-        print(f"Stance: {stance}")
-        for i, stance_i in enumerate(["against", "neutral", "favor"]):
-            for j, stance_j in enumerate(["against", "neutral", "favor"]):
-                prob_i_to_j = pyro.param('AutoDelta.probs_x')[i,j]
-                print(f"{stance_i} -> {stance_j}: {prob_i_to_j:.3f}")
+            if num_states == 3:
+                emission_probs = torch.tensor([[0.4, 0.4, 0.2], [0.3, 0.4, 0.3], [0.2, 0.4, 0.4]]).to(device)
+                # how many categoricals fall into these categories?
+                # stance_categoricals = opinion_categoricals[:, stance_idx, :]
+                # num_extreme_against = len(np.where(stance_categoricals[:, 0] >= emission_probs[0][0].item())[0])
+                # num_extreme_neutral = len(np.where(stance_categoricals[:, 1] >= emission_probs[1][1].item())[0])
+                # num_extreme_favor = len(np.where(stance_categoricals[:, 2] >= emission_probs[2][2].item())[0])
+                # print(f"Stance: {stance}")
+                # print(f"Num extreme against: {num_extreme_against}")
+                # print(f"Num extreme neutral: {num_extreme_neutral}")
+                # print(f"Num extreme favor: {num_extreme_favor}")
+                # print(f"Num left over: {len(stance_categoricals) - num_extreme_against - num_extreme_neutral - num_extreme_favor}")
+            elif num_states == 2:
+                emission_probs = torch.tensor([[0.4, 0.4, 0.2], [0.2, 0.4, 0.4]]).to(device)
+            
+            pyro.clear_param_store()
+
+            # We'll train using MAP Baum-Welch, i.e. MAP estimation while marginalizing
+            # out the hidden state x. This is accomplished via an automatic guide that
+            # learns point estimates of all of our conditional probability tables,
+            # named probs_*.
+            guide = AutoDelta(
+                poutine.block(model, expose_fn=lambda msg: msg["name"].startswith("probs_"))
+            )
+
+            # Enumeration requires a TraceEnum elbo and declaring the max_plate_nesting.
+            # All of our models have one plate: "data".
+            optim = pyro.optim.ClippedAdam({'lr': initial_lr, 'lrd': lrd})
+            elbo = JitTraceEnum_ELBO if jit else TraceEnum_ELBO
+            elbo = elbo(
+                max_plate_nesting=1 if model.__name__ == 'model_0' else 1,
+                strict_enumeration_warning=(True),
+            )
+            svi = SVI(model, guide, optim, elbo)
+
+            # We'll train on small minibatches.
+            pbar = tqdm.tqdm(range(num_steps))
+            losses = []
+            for step in pbar:
+                batch_size = min(batch_size, len(sequences)) if batch_size is not None else None
+                loss = svi.step(sequences, classifier_index, lengths, predictor_probs, emission_probs, num_states=num_states, jit=jit, batch_size=batch_size)
+                losses.append(loss / num_observations)
+                pbar.set_description(f"loss: {loss / num_observations:.4f}")
+
+            # Plot the loss curve.
+            fig, ax = plt.subplots()
+            ax.plot(losses)
+            ax.set(xlabel="Step", ylabel="Loss")
+            fig.savefig(os.path.join(fig_dir_path, f"{stance}_loss.png"))
+
+            print(f"Stance: {stance}")
+            if num_states == 3:
+                for i, stance_i in enumerate(["against", "neutral", "favor"]):
+                    for j, stance_j in enumerate(["against", "neutral", "favor"]):
+                        prob_i_to_j = pyro.param('AutoDelta.probs_x')[i,j]
+                        print(f"{stance_i} -> {stance_j}: {prob_i_to_j:.3f}")
+            elif num_states == 2:
+                for i, stance_i in enumerate(["against", "favor"]):
+                    for j, stance_j in enumerate(["against", "favor"]):
+                        prob_i_to_j = pyro.param('AutoDelta.probs_x')[i,j]
+                        print(f"{stance_i} -> {stance_j}: {prob_i_to_j:.3f}")
+
+            with open(probs_path, 'w') as f:
+                json.dump({k: v.cpu().tolist() for k, v in pyro.get_param_store().items()}, f)
+
+            # look at learned markov process sequences
+            # use viterbi to get most likely sequence
+            # guide = AutoDelta(poutine.block(model, expose_fn=lambda msg: msg["name"].startswith("probs_")))
+
+            # learned_sequence = np.zeros_like(sequences.cpu().numpy())
+            # for i in range(sequences.shape[0]):
+            #     for t in range(lengths[i]):
+            #         learned_sequence[i, t] = pyro.param(f'AutoDelta.x_{t}')[i].argmax().item()
+
+            # # plot learned sequence
+            # fig, ax = plt.subplots()
+            # for i in range(learned_sequence.shape[0]):
+            #     ax.plot(learned_sequence[i, :lengths[i]])
+            # fig.savefig(os.path.join(root_dir_path, "figs", "hmm", f"{stance}_learned_sequences.png"))
+
+def compare_hmm(dataset, root_dir_path):
+    dataset.aggregation = None
+    opinion_sequences, users, classifier_indices = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
+
+    subreddits = users['subreddit'].unique()
+
+    # dataset.aggregation = "inferred_categorical"
+    # opinion_stats, users = dataset.get_data(start=dataset.min_time_step, end=dataset.max_time_step)
+    # opinion_categoricals = opinion_stats[0]
+
+    estimator = estimate.StanceEstimation(dataset.all_classifier_profiles)
+
+    def get_f_norm(fig_dir_path, stance, subreddit):
+        if not os.path.exists(os.path.join(fig_dir_path, f"{stance}_probs.json")):
+            raise FileNotFoundError(f"{stance}_probs.json not found")
+        with open(os.path.join(fig_dir_path, f"{stance}_probs.json"), 'r') as f:
+            params = json.load(f)
+
+        transition_probs = np.array(params['AutoDelta.probs_x'])
+        identity_probs = np.eye(transition_probs.shape[0])
+        f_norm = np.linalg.norm(np.abs(transition_probs - identity_probs), ord='fro')
+
+        return f_norm
+
+    f_norms = {}
+    for stance_idx, stance in enumerate(dataset.stance_columns):
+        fig_dir_path = os.path.join(root_dir_path, "figs", "hmm")
+        f_norm = get_f_norm(fig_dir_path, stance, None)
+        f_norms[stance] = {}
+        f_norms[stance]['all'] = f_norm
+        for subreddit in subreddits:
+            try:
+                fig_dir_path = os.path.join(root_dir_path, "figs", "hmm", subreddit)
+                f_norm = get_f_norm(fig_dir_path, stance, subreddit)
+                f_norms[stance][subreddit] = f_norm
+            except:
+                pass
+
+    pretty_stances = {s: s.replace('stance_', '').replace('_', ' ').title() for s in dataset.stance_columns}
+    mapped = {
+        'Ndp': 'NDP',
+    }
+    pretty_stances = {s: mapped[p] if p in mapped else p for s, p in pretty_stances.items()}
+
+    if all([len(f_norms[stance]) > 1 for stance in f_norms]):
+        for stance in f_norms:
+            fig, ax = plt.subplots()
+            for subreddit in subreddits:
+                ax.bar(subreddit, f_norms[stance][subreddit])
+            ax.set_title(pretty_stances[stance])
+            ax.set_ylabel("Opinion Movement (Frobenius Norm)")
+            ax.set_xlabel("Subreddit")
+            ax.tick_params(axis='x', labelrotation=45)
+            fig.savefig(os.path.join(fig_dir_path, f"{stance}_f_norms.png"))
+
+    fig_dir_path = os.path.join(root_dir_path, "figs", "hmm")
+    fig, ax = plt.subplots(figsize=(4, 2))
+    for stance in f_norms:
+        ax.bar(pretty_stances[stance], f_norms[stance]['all'])
+    # ax.set_title("Frobenius Norms")
+    ax.set_ylabel("Opinion Movement (Frobenius Norm)")
+    ax.set_xlabel("Stance")
+    ax.tick_params(axis='x', labelrotation=45)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir_path, "f_norms.png"))
 
 def main():
     this_dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -323,21 +452,39 @@ def main():
     aggregation = "weighted_exponential_smoothing"
 
     if dataset_name == "reddit":
-        topics_dir_path = os.path.join(root_dir_path, "data", "reddit", "1sub_1year", "topics_minilm_0_2")
+        experiment_name = "1sub_1year"
+        if experiment_name == "4sub_1year":
+            topics_dir_path = os.path.join(root_dir_path, "data", "reddit", "4sub_1year")
+        else:
+            topics_dir_path = os.path.join(root_dir_path, "data", "reddit", "1sub_1year", "topics_minilm_0_2")
         dataset = opinion_datasets.RedditOpinionTimelineDataset(topics_dir_path, aggregation=aggregation, halflife=100., min_num_per_stance=50)
     elif dataset_name == "generative":
-        num_people = 10
-        max_time_step = 10
+        num_people = 100
         num_opinions = 3
-        dataset = opinion_datasets.GenerativeOpinionTimelineDataset(num_people=num_people, max_time_step=max_time_step, num_opinions=num_opinions)
+        num_data_points = 100
+        user_stance = np.random.uniform(-1, 1, (num_people, num_opinions))
+        user_stances = np.zeros((num_people, num_opinions, num_data_points))
+        user_stances[:, :, 0] = user_stance
+        for i in range(1, num_data_points):
+            user_stances[:, :, i] = user_stances[:, :, i-1] + np.random.normal(0, 0.1, (num_people, num_opinions))
+        user_stance_variance = np.tile(np.random.uniform(0, 0.1, (num_people, num_opinions, 1)), num_data_points)
+        fig_path = os.path.join(root_dir_path, "figs", "generative")
+        dataset = opinion_datasets.SimpleGenerativeOpinionTimelineDataset(user_stances, user_stance_variance, num_data_points, pred_profile_type='low_recall', aggregation=aggregation)
 
+        starts = [0]
+        ends = [num_data_points]
+    
     do_plot_movement = False
     if do_plot_movement:
         plot_movement(dataset, root_dir_path)
 
-    do_hmm = True
+    do_hmm = False
     if do_hmm:
         pyro_hmm(dataset, root_dir_path)
+
+    do_compare_hmm = True
+    if do_compare_hmm:
+        compare_hmm(dataset, root_dir_path)
 
 if __name__ == "__main__":
     main()
