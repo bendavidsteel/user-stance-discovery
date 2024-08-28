@@ -104,12 +104,12 @@ def main():
         sbc_exponent_loc=1.0,
         sbc_exponent_scale=0.1,
         comment_prob=0.2, 
-        sus_loc=0.99, 
+        sus_loc=0.8, 
         sus_scale=0.1,
-        seen_att_loc=0.005,
+        seen_att_loc=0.001,
         reply_att_loc=0.1,
         post_att_loc=0.05,
-        content_scale=0.2
+        content_scale=0.1
     )
     interval = 10
     fig, axes = plt.subplots(ncols=2, figsize=(12, 5))
@@ -136,50 +136,83 @@ def main():
     num_opinions = y.shape[-1]
     num_timesteps = 500
     means = np.full((num_users, num_timesteps, num_opinions), np.nan)
+
+    models = []
+    likelihoods = []
     # TODO batch with https://docs.gpytorch.ai/en/latest/examples/07_Pyro_Integration/index.html
     for i in tqdm.tqdm(range(num_users), "Fitting GPs to users"):
         for j in range(num_opinions):
-            kernel = gp.kernels.RBF(
-                input_dim=1, variance=torch.tensor(0.1), lengthscale=torch.tensor(2)
-            )
-            X_single, y_single = truncate(X_norm[i,:], y[i,:,j])
-            gpr = gp.models.GPRegression(X_single, y_single, kernel, noise=torch.tensor(0.5))
-            optimizer = torch.optim.Adam(gpr.parameters(), lr=0.005)
-            loss_fn = pyro.infer.Trace_ELBO().differentiable_loss
-            losses = []
-            variances = []
-            lengthscales = []
-            noises = []
-            num_steps = 2000
-            for _ in range(num_steps):
-                variances.append(gpr.kernel.variance.item())
-                lengthscales.append(gpr.kernel.lengthscale.item())
-                optimizer.zero_grad()
-                loss = loss_fn(gpr.model, gpr.guide)
-                loss.backward()
-                optimizer.step()
-                losses.append(loss.item())
+            train_x, train_y = truncate(X_norm[i,:], y[i,:,j])
+            likelihood = gpytorch.likelihoods.GaussianLikelihood()
+            model = ExactGPModel(train_x, train_y, likelihood)
+            models.append(model)
+            likelihoods.append(likelihood)
 
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(losses)
-            ax.set_xlabel("Iterations")
-            ax.set_ylabel("Loss")  # supress output text
-            fig.savefig(f'./figs/flows/user_{i}_op_{j}_losses.png')
+    model_list = gpytorch.models.IndependentModelList(*models)
+    likelihood_list = gpytorch.likelihoods.LikelihoodList(*likelihoods)
 
-            fig, ax = plt.subplots()
-            plot(X_single, y_single, model=gpr, plot_observed_data=True, plot_predictions=True, ax=ax)
-            fig.savefig(f'./figs/flows/user_{i}_op_{j}_mean.png')
+    model_list.train()
+    likelihood_list.train()
+    optimizer = torch.optim.Adam(model_list.parameters(), lr=0.1)  # Includes GaussianLikelihood parameters
+    mll = gpytorch.mlls.SumMarginalLogLikelihood(likelihood_list, model_list)
+    
+    losses = []
+    training_iter = 50
+    for k in range(training_iter):
+        # Zero gradients from previous iteration
+        optimizer.zero_grad()
+        # Output from model
+        output = model_list(*model_list.train_inputs)
+        # Calc loss and backprop gradients
+        loss = -mll(output, model_list.train_targets)
+        loss.backward()
+        print('Iter %d/%d - Loss: %.3f' % (i + 1, training_iter, loss.item()))
+        optimizer.step()
+        losses.append(loss.item())
 
-            x_start = max(torch.min(X_single) - 0.1 * (torch.max(X_single) - torch.min(X_single)), 0.)
-            x_end = min(torch.max(X_single) + 0.1 * (torch.max(X_single) - torch.min(X_single)), 1.)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(losses)
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("Loss")  # supress output text
+    fig.savefig(f'./figs/flows/losses.png')
+
+    for i in range(num_users):
+        for j in range(num_opinions):
+            model = model_list.models[i*num_opinions+j]
+            likelihood = likelihood_list.likelihoods[i*num_opinions+j]
+
+            # Get into evaluation (predictive posterior) mode
+            model.eval()
+            likelihood.eval()
+
+            train_x, train_y = truncate(X_norm[i,:], y[i,:,j])
+            x_start = max(torch.min(train_x) - 0.1 * (torch.max(train_x) - torch.min(train_x)), 0.)
+            x_end = min(torch.max(train_x) + 0.1 * (torch.max(train_x) - torch.min(train_x)), 1.)
             n_test = int((x_end - x_start) * num_timesteps)
-            Xtest = torch.linspace(x_start, x_end, n_test)  # test inputs
-            # compute predictive mean and variance
+            test_x = torch.linspace(x_start, x_end, n_test)  # test inputs
+
+            # Test points are regularly spaced along [0,1]
+            # Make predictions by feeding model through likelihood
+            with torch.no_grad(), gpytorch.settings.fast_pred_var():
+                observed_pred = likelihood(model(test_x))
+
             with torch.no_grad():
-                if type(gpr) == gp.models.VariationalSparseGP or type(gpr) == gp.models.VariationalGP:
-                    mean, cov = gpr(Xtest, full_cov=True)
-                else:
-                    mean, cov = gpr(Xtest, full_cov=True, noiseless=False)
+                # Initialize plot
+                f, ax = plt.subplots(1, 1, figsize=(4, 3))
+
+                # Get upper and lower confidence bounds
+                lower, upper = observed_pred.confidence_region()
+                # Plot training data as black stars
+                ax.plot(train_x.numpy(), train_y.numpy(), 'k*')
+                # Plot predictive means as blue line
+                mean = observed_pred.mean.numpy()
+                ax.plot(test_x.numpy(), mean, 'b')
+                # Shade between the lower and upper confidence bounds
+                ax.fill_between(test_x.numpy(), lower.numpy(), upper.numpy(), alpha=0.5)
+                ax.set_ylim([-3, 3])
+                ax.legend(['Observed Data', 'Mean', 'Confidence'])
+                f.savefig(f'./figs/flows/user_{i}_op_{j}_pred.png')
+
 
             start_idx = int(x_start * num_timesteps)
             means[i, start_idx:start_idx+mean.shape[0], j] = mean
