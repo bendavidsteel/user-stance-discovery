@@ -15,12 +15,22 @@ def main():
     sample_frac = None
     sample_per_topic = 100
 
+    prompt_method = 'general'
+    if prompt_method == 'stance':
+        prompt_func = get_prompt_template()
+    elif prompt_method == 'general':
+        def prompt_template(is_comment, has_parent):
+            if has_parent:
+                return 'Post: "{post}"\nParent comment: "{parent_comment}"\nComment: "{comment}"'
+            elif is_comment:
+                return 'Post: "{post}"\nComment: "{comment}"'
+            else:
+                return 'Post: "{post}"'
+        prompt_func = prompt_template
+
     # Load the data.
     comment_df = utils.get_comment_df(return_pd=False)
     submission_df = utils.get_submission_df(return_pd=False)
-
-    comment_df = comment_df.collect()
-    submission_df = submission_df.collect()
 
     comment_df, submission_df = utils.get_parents(comment_df, submission_df)
 
@@ -29,8 +39,19 @@ def main():
 
     run_dir_path = os.path.join(data_dir_path, 'topics_minilm_0_2')
 
-    with open(os.path.join(run_dir_path, 'topic_stances.json'), 'r') as f:
-        all_topic_stances = json.load(f)
+    topic_stance_source = 'dict'
+    if topic_stance_source == 'file':
+        with open(os.path.join(run_dir_path, 'topic_stances.json'), 'r') as f:
+            all_topic_stances = json.load(f)
+    elif topic_stance_source == 'dict':
+        all_topic_stances = {
+            'topic_stances': [
+                {
+                    'topics': [13],
+                    'stances': ['any']
+                }
+            ]
+        }
 
     with open(os.path.join(run_dir_path, 'topics.json'), 'r') as f:
         doc_topics = json.load(f)
@@ -88,11 +109,11 @@ def main():
                 d = {k: t.replace('\n', ' ') if t is not None else None for k, t in d.items()}
 
                 if 'parent_comment' in d and len(d) > 1:
-                    prompt = get_prompt_template(True, True)
+                    prompt = prompt_func(True, True)
                 elif len(d) > 1:
-                    prompt = get_prompt_template(True, False)
+                    prompt = prompt_func(True, False)
                 else:
-                    prompt = get_prompt_template(False, False)
+                    prompt = prompt_func(False, False)
                 prompt = prompt.format(**d, target=stance)
 
                 # split prompt into readable lines

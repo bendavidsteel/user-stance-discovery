@@ -564,8 +564,6 @@ def main():
     snapshot = 'year'
 
     if dataset_name == "reddit":
-        this_dir_path = os.path.dirname(os.path.realpath(__file__))
-        root_dir_path = os.path.join(this_dir_path, "..", "..")
         experi = "4sub_1year"
         subsample_users = None
         if experi == "1sub_1year":
