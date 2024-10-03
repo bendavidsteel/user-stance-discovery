@@ -46,35 +46,35 @@ def plot(
             end_x = max_x + 0.1 * (max_x - min_x)
             test_x = torch.linspace(start_x, end_x, n_test)
             test_classifier_ids = torch.zeros(n_test, dtype=torch.long)
-            model_pred = model(test_x)
-            likelihood.set_classifier_ids(test_classifier_ids)
-            observed_pred = likelihood(model_pred)
+            model_pred = model.predict(test_x)
+            # likelihood.set_classifier_ids(test_classifier_ids)
+            # observed_pred = likelihood(model_pred)
             # Get upper and lower confidence bounds
-            # lower, upper = observed_pred.confidence_region()
+            lower, upper = model_pred.confidence_region()
             # Plot predictive means as blue line
             # mean = get_expected_class(model_pred.loc.T)
             ax.plot(test_x.numpy(), model_pred.loc.numpy(), 'b')
             # lower = get_expected_class(lower.T)
             # upper = get_expected_class(upper.T)
             # Shade between the lower and upper confidence bounds
-            # ax.fill_between(test_x.numpy(), lower.numpy(), upper.numpy(), alpha=0.5)
+            ax.fill_between(test_x.numpy(), lower.numpy(), upper.numpy(), alpha=0.5)
         ax.set_ylim([-3, 3])
         ax.legend(['Observed Data', 'Mean', 'Confidence'])
 
 
 
 def main():
-    num_data_points = 11
+    num_data_points = 10
     user_stance = np.linspace(-1, 1, num_data_points)
     user_stance_variance = 0.1
-    predict_profile = 'perfect'
+    predict_profile = 'low_recall'
     dataset = datasets.SimpleGenerativeOpinionTimelineDataset(user_stance, user_stance_variance, num_data_points, pred_profile_type=predict_profile, halflife=10.)
 
     X_norm, X, y, classifier_ids = prep_gp_data(dataset)
     all_classifier_profiles = dataset.all_classifier_profiles
 
     time_span_ratio = (torch.max(X) - torch.min(X)) / (torch.max(X_norm) - torch.min(X_norm))
-    lengthscale_loc = time_span_ratio * 0.00001
+    lengthscale_loc = time_span_ratio * 0.01
     lengthscale_scale = time_span_ratio * 0.1
 
     model_list, likelihood_list, model_map, train_xs, train_ys = get_gp_models(
