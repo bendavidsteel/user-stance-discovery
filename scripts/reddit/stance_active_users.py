@@ -2,6 +2,8 @@ import json
 import os
 import uuid
 
+import dotenv
+import numpy as np
 import polars as pl
 import tqdm
 import wandb
@@ -9,6 +11,7 @@ import wandb
 from stance import StanceClassifier, StanceDataset, get_stance_f1_score, get_fbeta_score
 import utils
 
+from cluster_threads import filter_comments
 
 def get_stance_dataset(stance, stance_slug, df, cols, train_num, val_num, dataset_strategy):
     if not any(f'gold_{stance_slug}' in c for c in df.columns):
@@ -40,7 +43,7 @@ def eval_stance_detection(stance, dataset, classifier, batch_size, train_num, va
                     'comment': input.comment,
                     'comment_parent': input.parent_comment,
                     'post': input.post,
-                    'target': input.target_opinion,
+                    'target': input.target_stance,
                     'gold_stance': input.gold_stance,
                     'model_output': classifier._extra_responses,
                 })
@@ -104,12 +107,12 @@ def do_stance_detection(stance, stance_slug, topic_path, topic_comments, topic_c
 
     stance_dataset = get_stance_dataset(stance, stance_slug, topic_comments, ['body', 'body_parent', 'post_all_text'], train_num, val_num, dataset_strategy)
     
-    classifier = StanceClassifier(model_name=model_name, model_prompt_template=model_prompt_template, prompting_method=prompting_method, opinion_method=opinion_method, backend="dspy", teleprompter=teleprompter)
+    classifier = StanceClassifier(model_name=model_name, model_prompt_template=model_prompt_template, prompting_method=prompting_method, opinion_method=opinion_method, backend="dspy", optimizer=teleprompter)
     classifier.shot_num = train_num + val_num
 
     if "tune" in teleprompter:
         if "multitask" in teleprompter:
-            task = stance_dataset.get_train_data()[0].target_opinion.replace(' ', '_')
+            task = stance_dataset.get_train_data()[0].target_stance.replace(' ', '_')
         else:
             task = "all_tasks"
         # check for saved model checkpoint
@@ -176,18 +179,23 @@ def do_stance_detection(stance, stance_slug, topic_path, topic_comments, topic_c
     classifier.remove_model()
 
 def main():
+    dotenv.load_dotenv()
+
     batch_size = 1
 
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
     data_dir_path = os.path.join(this_dir_path, '..', '..', 'data', 'reddit')
 
-    experiment = '4sub_1year'
+    experiment = '4sub_2year'
 
     if experiment == '1sub_1year':
         run_dir_path = os.path.join(data_dir_path, '1sub_1year', 'topics_minilm_0_2')
         subreddits = ['canada']
     elif experiment == '4sub_1year':
         run_dir_path = os.path.join(data_dir_path, '4sub_1year')
+        subreddits = ['canada', 'ontario', 'toronto', 'vancouver']
+    elif experiment == '4sub_2year':
+        run_dir_path = os.path.join(data_dir_path, '4sub_2year', 'topics_minilm_0_0250')
         subreddits = ['canada', 'ontario', 'toronto', 'vancouver']
 
     with open(os.path.join(run_dir_path, 'topic_stances.json'), 'r') as f:
@@ -197,21 +205,55 @@ def main():
     with open(os.path.join(data_dir_path, '1sub_1year', 'topics_minilm_0_2', 'topic_stances.json'), 'r') as f:
         gold_topic_stances = json.load(f)
 
-    doc_topics_path = os.path.join(run_dir_path, 'topics.json')
-    with open(doc_topics_path, 'r') as f:
-        doc_topics = json.load(f)
+    if experiment in ['1sub_1year', '4sub_1year']:
+        doc_topics_path = os.path.join(run_dir_path, 'topics.json')
+        with open(doc_topics_path, 'r') as f:
+            doc_topics = json.load(f)
+    elif experiment == '4sub_2year':
+        doc_topics_path = os.path.join(run_dir_path, 'topics.npy')
+        doc_topics = np.load(doc_topics_path)
 
-    comments_df = utils.get_comment_df(return_pd=False, subreddits=subreddits)
-    submissions_df = utils.get_submission_df(return_pd=False, subreddits=subreddits)
+    if experiment in ['1sub_1year', '4sub_1year']:
+        comments_df = utils.get_comment_df(return_pd=False, subreddits=subreddits)
+        submissions_df = utils.get_submission_df(return_pd=False, subreddits=subreddits)
 
-    comments_df, submissions_df = utils.get_parents(comments_df, submissions_df)
-    comments_df = comments_df.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('post_all_text'))
+        comments_df, submissions_df = utils.get_parents(comments_df, submissions_df)
+        comments_df = comments_df.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('post_all_text'))
 
-    if experiment == '1sub_1year':
-        assert len(doc_topics) == len(comments_df) + len(submissions_df)
-    elif experiment == '4sub_1year':
-        assert len(doc_topics) == len(comments_df)
-    comments_df = comments_df.with_columns(pl.Series(name='topic', values=doc_topics[:len(comments_df)]))
+        if experiment == '1sub_1year':
+            assert len(doc_topics) == len(comments_df) + len(submissions_df)
+        elif experiment == '4sub_1year':
+            assert len(doc_topics) == len(comments_df)
+        comments_df = comments_df.with_columns(pl.Series(name='topic', values=doc_topics[:len(comments_df)]))
+    elif experiment == '4sub_2year':
+        comment_dir_path = './data/reddit/processed_comments'
+        submission_dir_path = './data/reddit/processed_submissions'
+        comment_files = [f for f in os.listdir(comment_dir_path) if 'filtered' in f]
+        comment_files = sorted(comment_files)
+        cum_idx = 0
+        comments_df = None
+        relevant_topics = []
+        for topics_stances in all_topic_stances['topic_stances']:
+            relevant_topics.extend(topics_stances['topics'])
+        for comment_file in tqdm.tqdm(comment_files, desc='Transforming data'):
+            # find equivalent submission file
+            submission_file = comment_file.replace('comments', 'submissions')
+            if submission_file not in os.listdir(submission_dir_path):
+                continue
+            file_comment_df = pl.read_parquet(os.path.join(comment_dir_path, comment_file), columns=['permalink', 'id', 'parent_id', 'body', 'author'])
+            file_submission_df = pl.read_parquet(os.path.join(submission_dir_path, submission_file), columns=['permalink', 'title', 'selftext'])
+            file_comment_df, file_submission_df = utils.get_parents(file_comment_df, file_submission_df)
+            file_comment_df = filter_comments(file_comment_df)
+            file_comment_df = file_comment_df.with_columns(pl.concat_str([pl.col('title'), pl.col('selftext')], separator=' ').alias('post_all_text'))
+            file_comment_df = file_comment_df.with_columns(pl.Series(name='topic', values=doc_topics[cum_idx:cum_idx+len(file_comment_df)]))
+            cum_idx += len(file_comment_df)
+            file_comment_df = file_comment_df.filter(pl.col('topic').is_in(relevant_topics))
+            if comments_df is None:
+                comments_df = file_comment_df
+            else:
+                comments_df = pl.concat([comments_df, file_comment_df])
+        assert cum_idx == len(doc_topics)
+        
 
     for topics_stances in all_topic_stances['topic_stances']:
 

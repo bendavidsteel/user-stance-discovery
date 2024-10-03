@@ -11,16 +11,17 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 import wandb
 
+from dspy.signatures.signature import signature_to_template
+
 import stance
 
 
 class Tune:
 
-    def compile(self, student, model_name, model_prompt_template, trainset, valset, lr=3e-2, num_epochs=50, gradient_accumulation_steps=8, log_to_wandb=True, **kwargs):
+    def compile(self, student, model_name, trainset, valset, lr=3e-2, num_epochs=50, gradient_accumulation_steps=8, log_to_wandb=True, **kwargs):
         
         self.student = student
         self.model_name = model_name
-        self.model_prompt_template = model_prompt_template
         self.trainset = trainset
         self.valset = valset
         self.kwargs = kwargs
@@ -32,7 +33,7 @@ class Tune:
         if all_tasks:
             self.dataset_name = "all_tasks"
         else:
-            self.dataset_name = trainset[0].target_opinion.replace(' ', '_')
+            self.dataset_name = trainset[0].target_stance.replace(' ', '_')
 
         train = [self._ex_to_dict(ex) for ex in trainset]
         if valset:
@@ -209,10 +210,10 @@ class Tune:
             # eval_loss += loss.detach().float()
             with torch.no_grad():
                 outputs = self.model.generate(
-                    input_ids=batch["input_ids"][:,:-1], attention_mask=batch["attention_mask"][:,:-1], max_new_tokens=10, eos_token_id=self.tokenizer.eos_token_id, pad_token_id=self.tokenizer.pad_token_id
+                    input_ids=batch["input_ids"][:,:-1], attention_mask=batch["attention_mask"][:,:-1], max_new_tokens=2, eos_token_id=self.tokenizer.eos_token_id, pad_token_id=self.tokenizer.pad_token_id
                 )
             output = self.tokenizer.batch_decode(outputs[:,batch['input_ids'].shape[1]-1:].detach().cpu().numpy(), skip_special_tokens=True)[0]
-            gold = self.tokenizer.batch_decode(batch['labels'][:,-1:].detach().cpu().numpy(), skip_special_tokens=True)[0]
+            gold = self.tokenizer.batch_decode(batch['input_ids'][:,-1:].detach().cpu().numpy(), skip_special_tokens=True)[0]
             eval_outputs.append(output)
             eval_preds.append(stance._parse_opinion_answer(output))
             eval_gold.append(stance._parse_opinion_answer(gold))
@@ -224,44 +225,31 @@ class Tune:
 
     def _ex_to_dict(self, ex):
         ex = dict(ex)
-        completion = ex.pop(self.signature.fields[-1].output_variable)
+        completion = ex.pop('stance')
         ex = dsp.Example(demos=[], **ex)
-        prompt = self.signature(ex).strip()
-        prompt = self.model_prompt_template.format(prompt=prompt)
-        return dict(prompt=prompt, completion=completion)
+        template = signature_to_template(self.signature)
+        prompt = template(ex)
+        messages = stance.prompt_to_messages(prompt)
+        return dict(prompt=messages, completion=completion)
 
 
 class FineTune(Tune):
 
     def _preprocess_function(self, examples):
         batch_size = len(examples[self.text_column])
-        inputs = examples[self.text_column]
+        input_messages = examples[self.text_column]
         targets = examples[self.label_column]
-        model_inputs = self.tokenizer([f"{i} {l}" for i, l in zip(inputs, targets)])
-        labels = self.tokenizer(targets, add_special_tokens=False)
+        model_inputs = []
+        for input_message, target in zip(input_messages, targets):
+            input_message[-1]['content'] = input_message[-1]['content'] + f" {target}"
+        model_inputs = self.tokenizer.apply_chat_template(input_messages, tokenize=True, add_generation_prompt=False, continue_final_message=True, return_dict=True, return_tensors='pt', truncation=True, padding=True, max_length=2048)
+        model_inputs['labels'] = model_inputs['input_ids'].clone()
+
         for i in range(batch_size):
             sample_input_ids = model_inputs["input_ids"][i]
-            label_input_ids = labels["input_ids"][i] # + [tokenizer.pad_token_id]
-            # print(i, sample_input_ids, label_input_ids)
-            model_inputs["input_ids"][i] = sample_input_ids
-            labels["input_ids"][i] = [-100] * (len(sample_input_ids) - len(label_input_ids)) + label_input_ids
-            model_inputs["attention_mask"][i] = [1] * len(model_inputs["input_ids"][i])
+            target_len = self.tokenizer(f" {target}", return_tensors='pt', add_special_tokens=False)['input_ids'].shape[1]
+            model_inputs["labels"][i,:-target_len] = torch.full((len(sample_input_ids) - target_len,), -100)
         
-        max_length = max(len(x) for x in model_inputs["input_ids"])
-        for i in range(batch_size):
-            sample_input_ids = model_inputs["input_ids"][i]
-            label_input_ids = labels["input_ids"][i]
-            # model_inputs["input_ids"][i] = [tokenizer.pad_token_id] * (
-            #     max_length - len(sample_input_ids)
-            # ) + sample_input_ids
-            # model_inputs["attention_mask"][i] = [0] * (max_length - len(sample_input_ids)) + model_inputs[
-            #     "attention_mask"
-            # ][i]
-            # labels["input_ids"][i] = [-100] * (max_length - len(sample_input_ids)) + label_input_ids
-            model_inputs["input_ids"][i] = torch.tensor(model_inputs["input_ids"][i])#[:max_length])
-            model_inputs["attention_mask"][i] = torch.tensor(model_inputs["attention_mask"][i])#[:max_length])
-            labels["input_ids"][i] = torch.tensor(labels["input_ids"][i])#[:max_length])
-        model_inputs["labels"] = labels["input_ids"]
         return model_inputs
 
     def _get_peft_config(self):
@@ -296,15 +284,14 @@ class FineTune(Tune):
         return eval_f1
     
     def _define_lm(self):
-        lm = HFModel(self.model_name, is_client=True)
-        lm.model = self.model
-        lm.tokenizer = self.tokenizer
-        lm.model_prompt_template = self.model_prompt_template
-        lm.drop_prompt_from_output = True
-        lm.kwargs['temperature'] = 0.0
-        lm.is_client = False
-        lm.kwargs['pad_token_id'] = self.tokenizer.pad_token_id
-        lm.kwargs['eos_token_id'] = self.tokenizer.eos_token_id
+        model_kwargs = {
+            'torch_dtype': torch.bfloat16, 
+            'use_flash_attention_2': True, 
+            'trust_remote_code': True, 
+            'device_map': 'auto',
+            'token': os.environ['HF_TOKEN']
+        }
+        lm = stance.LocalModel(self.model_name, model=self.model, model_kwargs=model_kwargs)
         return lm
 
 class PromptTune(Tune):
@@ -313,6 +300,7 @@ class PromptTune(Tune):
         batch_size = len(examples[self.text_column])
         inputs = examples[self.text_column]
         targets = examples[self.label_column]
+        # TODO apply chat template
         model_inputs = self.tokenizer(inputs, add_special_tokens=False)
         labels = self.tokenizer(targets, add_special_tokens=False)
         for i in range(batch_size):
@@ -445,13 +433,14 @@ class MultiTaskPromptTune(PromptTune):
         ex = dsp.Example(demos=[], **ex)
         prompt = self.signature(ex).strip()
         prompt = self.model_prompt_template.format(prompt=prompt)
-        task_id = self.kwargs['task_map'][ex.target_opinion]
+        task_id = self.kwargs['task_map'][ex.target_stance]
         return dict(prompt=prompt, completion=completion, task_id=task_id)
     
     def _preprocess_function(self, examples):
         batch_size = len(examples[self.text_column])
         inputs = examples[self.text_column]
         targets = examples[self.label_column]
+        # TODO add apply chat template
         model_inputs = self.tokenizer(inputs, add_special_tokens=False)
         labels = self.tokenizer(targets, add_special_tokens=False)
         for i in range(batch_size):
