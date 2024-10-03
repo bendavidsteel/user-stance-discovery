@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from mining import estimate, datasets
-from mining.estimate import prep_gp_data, train_gaussian_process, get_gp_means, get_gp_models, get_splines
+from mining.estimate import prep_gp_data, train_gaussian_process, get_gp_means, get_gp_models, get_splines, get_spline_means
 
 def get_expected_class(model_output):
     # Convert to probabilities using exp
@@ -62,7 +62,7 @@ def plot_gp(
         ax.legend(['Observed Data', 'Mean', 'Confidence'])
 
 def plot_spline(
-    model,
+    timeline, mean, confidence_interval,
     train_x=None,
     train_y=None,
     plot_observed_data=False,
@@ -80,15 +80,17 @@ def plot_spline(
         # Plot training data as black stars
         ax.plot(train_x.numpy(), train_y.numpy(), 'k*')
     if plot_predictions:
-        min_x = torch.min(train_x)
-        max_x = torch.max(train_x)
-        start_x = min_x - 0.1 * (max_x - min_x)
-        end_x = max_x + 0.1 * (max_x - min_x)
-        test_x = torch.linspace(start_x, end_x, n_test)
-        test_y = model.predict(test_x.reshape(-1, 1)).reshape(-1)  
+        # min_x = torch.min(train_x)
+        # max_x = torch.max(train_x)
+        # start_x = min_x - 0.1 * (max_x - min_x)
+        # end_x = max_x + 0.1 * (max_x - min_x)
+        # test_x = torch.linspace(start_x, end_x, n_test)
+        # test_y = model.predict(test_x.reshape(-1, 1)).reshape(-1)  
         # Plot predictive means as blue line
         # mean = get_expected_class(model_pred.loc.T)
-        ax.plot(test_x.numpy(), test_y, 'b')
+        # ax.plot(test_x.numpy(), test_y, 'b')
+        ax.plot(timeline, mean, 'b')
+        ax.fill_between(timeline, confidence_interval[:,0], confidence_interval[:,1], alpha=0.5)
     ax.set_ylim([-3, 3])
     ax.legend(['Observed Data', 'Mean', 'Confidence'])
 
@@ -127,7 +129,7 @@ def main():
         #     plot(model, likelihood, train_x=X_norm[i,:], train_y=y[i,:,k], plot_observed_data=True, plot_predictions=True, ax=ax)
         # plt.show()
         
-        model_list, likelihood_list, model_map, losses = train_gaussian_process(
+        models, likelihood_list, model_map, losses = train_gaussian_process(
             X_norm, 
             y, 
             classifier_ids, 
@@ -137,11 +139,12 @@ def main():
             gp_type='ordinal',
         )
     elif model_type == 'spline':
-        model_list, model_map = get_splines(X_norm, y)
+        models, coef_bootstraps, spline_transformers, model_map = get_splines(X_norm, y, alpha=1e-1)
+        timelines, means, confidence_intervals = get_spline_means(dataset, models, coef_bootstraps, spline_transformers, model_map, X_norm, X, y)
 
     # get some samples from the untrained models
     fig, ax = plt.subplots(1, 1, figsize=(4, 3))
-    for idx in range(min(3, len(model_list))):
+    for idx in range(min(3, len(models))):
         if model_type == 'gp':
             i, k = model_map[idx]
             model = model_list[idx]
@@ -149,8 +152,9 @@ def main():
             plot_gp(model, likelihood, train_x=X_norm[i,:], train_y=y[i,:,k], plot_observed_data=True, plot_predictions=True, ax=ax)
         elif model_type == 'spline':
             i, k = model_map[idx]
-            model = model_list[idx]
-            plot_spline(model, train_x=X_norm[i,:], train_y=y[i,:,k], plot_observed_data=True, plot_predictions=True, ax=ax)
+            # model = model_list[idx]
+            timeline, mean, confidence_interval = timelines[i], means[i,:,k], confidence_intervals[i,:,k]
+            plot_spline(timeline, mean, confidence_interval, train_x=X[i,:], train_y=y[i,:,k], plot_observed_data=True, plot_predictions=True, ax=ax)
     plt.show()
 
     # timestamps, means = get_gp_means(dataset, model_list, likelihood_list, model_map, X_norm, X, y)
