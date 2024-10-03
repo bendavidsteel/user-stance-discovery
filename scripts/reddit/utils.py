@@ -92,8 +92,8 @@ def process_quotes(comments_context):
         return t
 
     for comment_context in comments_context:
-        process_quote(comment_context[0])
+        comment_context[0] = process_quote(comment_context[0])
         if comment_context[1] is not None:
-            process_quote(comment_context[1])
+            comment_context[1] = process_quote(comment_context[1])
 
     return comments_context

@@ -1,3 +1,4 @@
+import copy
 import os
 import random
 import re
@@ -8,6 +9,7 @@ from dspy.datasets.dataset import Dataset as DSPyDataset
 from dspy.teleprompt import BootstrapFewShot, BootstrapFewShotWithOptuna, BootstrapFewShotWithRandomSearch, LabeledFewShot, BootstrapFinetune
 from sklearn import metrics as sk_metrics
 import torch
+import transformers
 
 import lm
 import tuning
@@ -136,16 +138,16 @@ def _extract_example(field_names, example, raw_pred):
 
 class CommentStanceDetectionSignature(dspy.Signature):
     """Predict the stance of the comment towards the target issue.
-    If the comment is directly or indirectly agreeing with the target issue, or opposing or critizing something opposed to the target issue, then the opinion should be agree.
-    If the comment is directly or indirectly disagreeing with the target issue, or opposing or critizing something in favor of the target issue, then the opinion should be disagree.
-    If the comment is discussing something irrelevant to the target, then the opinion should be neutral"""
+    If the comment is directly or indirectly in favor of the target issue, or opposing or critizing something opposed to the target issue, then the stance should be favor.
+    If the comment is directly or indirectly against the target issue, or opposing or critizing something in favor of the target issue, then the stance should be against.
+    If the comment is discussing something irrelevant to the target, then the stance should be neutral"""
 
-    target_opinion = dspy.InputField(desc="""The target issue that is either being agreed with, neutral, or disagreed with.""", prefix="Target Issue: ")
-    target_explanation = dspy.InputField(desc="""An explanation of the target issue, may be useful in determining the opinion of the comment.""")
+    target_stance = dspy.InputField(desc="""The target issue that the comment either favors, is neutral to, or is against.""", prefix="Target Issue: ")
+    target_explanation = dspy.InputField(desc="""An explanation of the target issue, may be useful in determining the stance of the comment.""")
     post = dspy.InputField(desc="""The post being commented on, may be useful in determining what the comment is discussing.""")
     parent_comment = dspy.InputField(desc="""The parent comment being replied to, may be useful in determining the context of the comment.""")
-    comment = dspy.InputField(desc="""The comment to determine the opinion of.""")
-    opinion = dspy.OutputField(desc="""${agree, disagree, or neutral}""", prefix="Opinion: Therefore the opinion of the comment is ")
+    comment = dspy.InputField(desc="""The comment to determine the stance of.""")
+    stance = dspy.OutputField(desc="""${favor, neutral, or against}""", prefix="Stance: The stance of the comment is ")
 
     def extract(example, raw_pred):
         field_names = ['target_opinion', 'target_explanation', 'post', 'parent_comment', 'comment', 'opinion']
@@ -160,7 +162,7 @@ class CommentStanceDetectionTemplateSignature(dspy.Signature):
     post = dspy.InputField(desc="""The post being commented on, may be useful in determining what the comment is discussing.""")
     parent_comment = dspy.InputField(desc="""The parent comment being replied to, may be useful in determining the context of the comment.""")
     comment = dspy.InputField(desc="""The comment to determine the opinion of.""")
-    opinion = dspy.OutputField(desc="""${favor, neutral, or against}""", prefix="Stance: The stance of the comment is ")
+    stance = dspy.OutputField(desc="""The stance of the comment is ${favor, neutral, or against}""", prefix="Stance: The stance of the comment is ")
 
     def __call__(self, *args, **kwargs):
         return ""
@@ -181,17 +183,17 @@ class TwoStepCommentStanceDetectionSignature(dspy.Signature):
     post = dspy.InputField(desc="""The post being commented on, may be useful in determining the relevancy or opinion of the comment""")
     parent_comment = dspy.InputField(desc="""The parent comment being replied to, may be useful in determining the relevancy or opinion of the comment.""")
     comment = dspy.InputField(desc="""The comment to determine the opinion of.""")
-    target_opinion = dspy.InputField(desc="""The target that is either being agreed with, disagreed with, or not discussed.""")
+    target_stance = dspy.InputField(desc="""The target that is either being agreed with, disagreed with, or not discussed.""")
     target_explanation = dspy.InputField(desc="""An explanation of the target, may be useful in determining the opinion of the comment.""")
     presence_of_opinion = dspy.OutputField(desc="""Choice between yes and no""")
-    opinion = dspy.OutputField(desc="""Choice between agree and disagree.""")
+    stance = dspy.OutputField(desc="""Choice between agree and disagree.""")
 
 class YesNoCommentStanceDetectionSignature(dspy.Signature):
     """Is the comment agreeing with the target opinion?
     If the comment is directly or indirectly agreeing with the opinion, or opposing or critizing something opposed to the opinion, then the answer is yes.
     If the comment is not agreeing with the opinion, or if the comment is not discussing the opinion, then the answer is no."""
 
-    target_opinion = dspy.InputField(desc="""The target opinion.""")
+    target_stance = dspy.InputField(desc="""The target opinion.""")
     target_explanation = dspy.InputField(desc="""An explanation of the target opinion, may be useful in determining the opinion of the comment.""")
     post = dspy.InputField(desc="""The post being commented on, may be useful in determining the opinion of the comment""")
     parent_comment = dspy.InputField(desc="""The parent comment being replied to, may be useful in determining the opinion of the comment.""")
@@ -205,7 +207,7 @@ class YesNoCommentStanceDetectionSignature(dspy.Signature):
 class PostStanceDetectionSignature(dspy.Signature):
     """Determine the stance of the post towards the target."""
 
-    target = dspy.InputField(desc="""The target of the stance detection.""")
+    target_stance = dspy.InputField(desc="""The target of the stance detection.""")
     target_explanation = dspy.InputField(desc="""An explanation of the target, may be useful in determining the stance of the post.""")
     post = dspy.InputField(desc="""The post being commented on.""")
     parent_comment = dspy.InputField(desc="""The comment being replied to.""")
@@ -241,7 +243,7 @@ class DSPyStanceDataset(DSPyDataset):
         ds = []
         for ex in examples:
             d = ex.copy()
-            d['target_opinion'] = target
+            d['target_stance'] = target
             d['target_explanation'] = target_explanation
             ds.append(d)
 
@@ -279,22 +281,126 @@ class StanceDataset:
 
     def get_test_data(self):
         if self.backend == 'dspy':
-            return [x.with_inputs('post', 'parent_comment', 'comment', 'target_opinion', 'target_explanation') for x in self.dataset.test]
+            return [x.with_inputs('post', 'parent_comment', 'comment', 'target_stance', 'target_explanation') for x in self.dataset.test]
         elif self.backend == 'hf':
             return self.dataset[self.train_num + self.val_num:]
         
     def get_train_data(self):
         if self.backend == 'dspy':
-            return [x.with_inputs('post', 'parent_comment', 'comment', 'target_opinion', 'target_explanation') for x in self.dataset.train]
+            return [x.with_inputs('post', 'parent_comment', 'comment', 'target_stance', 'target_explanation') for x in self.dataset.train]
         elif self.backend == 'hf':
             return self.dataset[:self.train_num]
 
     def get_dev_data(self):
         if self.backend == 'dspy':
-            return [x.with_inputs('post', 'parent_comment', 'comment', 'target_opinion', 'target_explanation') for x in self.dataset.dev]
+            return [x.with_inputs('post', 'parent_comment', 'comment', 'target_stance', 'target_explanation') for x in self.dataset.dev]
         elif self.backend == 'hf':
             return self.dataset[self.train_num:self.train_num + self.val_num]
         
+def prompt_to_messages(prompt):
+    gen_start = prompt.split("Stance:")[-1].strip()
+    user_prompt = prompt[:-len(gen_start)].strip()
+
+    messages = [
+        {"role": "user", "content": user_prompt},
+        {"role": "assistant", "content": gen_start}
+    ]
+
+    return messages
+    
+
+class LocalModel(dsp.LM):
+    def __init__(self, model_name, model=None, model_kwargs={}):
+        self.model_name = model_name
+        self.provider = "default"
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        if model is not None:
+            self.model = model
+        else:
+            self.model = transformers.AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
+        # self.model.to(self.device)
+        self.drop_prompt_from_output = True
+        self.kwargs = {}
+        self.kwargs['temperature'] = 0.0
+        # self.kwargs['pad_token_id'] = self.tokenizer.pad_token_id
+        # self.kwargs['eos_token_id'] = self.tokenizer.eos_token_id
+
+        self.history = []
+
+        # Init StaticCache with big enough max-length (1024 tokens for the below example)
+        # You can also init a DynamicCache, if that suits you better
+        # model doeesn't support staticcache with flash attention 2
+        # self.prompt_cache = transformers.StaticCache(config=self.model.config, max_batch_size=1, max_cache_len=1024, device="cuda", dtype=torch.bfloat16)
+
+        # self.last_input = None
+        # self.current_prepend = torch.zeros((1,0), dtype=torch.int64).to(self.device)
+
+    def basic_request(self, prompt: str, **kwargs):
+        messages = prompt_to_messages(prompt)
+        inputs = self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False, continue_final_message=True, return_dict=True, return_tensors="pt")
+
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        # if self.last_input is None:
+        #     self.last_input = inputs
+        # else:
+        #     # find prepend of shared tokens
+        #     min_length = min(inputs['input_ids'].shape[-1], self.last_input['input_ids'].shape[-1])
+        #     same_ids = (inputs['input_ids'][:,:min_length] == self.last_input['input_ids'][:,:min_length])[0]
+        #     shared_prepend_length = same_ids.tolist().index(False) if False in same_ids else len(same_ids)
+            
+        #     # Fill in shared prepend logic
+        #     shared_prepend = inputs['input_ids'][:, :shared_prepend_length]
+            
+        #     if shared_prepend.numel() > 0 and not torch.equal(shared_prepend, self.current_prepend):
+        #         inputs_initial_prompt = {
+        #             'input_ids': shared_prepend,
+        #             'attention_mask': inputs['attention_mask'][:, :shared_prepend_length]
+        #         }
+        #         # This is the common prompt cached, we need to run forward without grad to be able to copy
+        #         with torch.no_grad():
+        #             self.prompt_cache = self.model(**inputs_initial_prompt, past_key_values=self.prompt_cache).past_key_values
+        #         self.current_prepend = shared_prepend
+        #     self.last_input = inputs
+
+        kwargs = {**self.kwargs, **kwargs}
+        if kwargs['temperature'] == 0.0:
+            del kwargs['temperature']
+            kwargs['do_sample'] = False
+            kwargs['top_p'] = None
+        else:
+            kwargs['do_sample'] = True
+
+        # add iterative generation caching https://huggingface.co/docs/transformers/main/en/kv_cache
+        # if self.current_prepend is not None and self.current_prepend.shape[1] > 0 and torch.equal(inputs['input_ids'][:, :self.current_prepend.shape[1]], self.current_prepend):
+        #     past_key_values = copy.deepcopy(self.prompt_cache)
+        #     model_output = self.model.generate(**inputs, past_key_values=past_key_values, **kwargs)
+        # else:
+        model_output = self.model.generate(**inputs, **kwargs)
+        input_ids = inputs['input_ids']
+        response = self.tokenizer.decode(model_output[0,input_ids.shape[1]:], skip_special_tokens=True)
+
+        self.history.append({
+            "prompt": prompt,
+            "response": response,
+            "kwargs": kwargs,
+        })
+        return {
+            "content": [
+                {
+                    "text": response,
+                }
+            ]
+        }
+
+    def __call__(self, prompt, only_completed=True, return_sorted=False, **kwargs):
+        response = self.request(prompt, **kwargs)
+
+        completions = [result["text"] for result in response["content"]]
+
+        return completions
+
 
 class StancesDataset(StanceDataset):
     def __init__(self, stance_datasets):
@@ -320,7 +426,7 @@ class StancesDataset(StanceDataset):
 
 
 class StanceClassifier:
-    def __init__(self, model_name, model_prompt_template=None, prompting_method='predict', opinion_method='twostep', backend='dspy', teleprompter='bootstrap'):
+    def __init__(self, model_name, model_prompt_template=None, prompting_method='predict', opinion_method='twostep', backend='dspy', optimizer='bootstrap'):
         self.backend = backend
         if self.backend == 'hf':
             if model_name == 'mistral':
@@ -339,17 +445,20 @@ class StanceClassifier:
         elif self.backend == 'dspy':
             self.model_name = model_name
             self.model_prompt_template = model_prompt_template
-            if "tune" not in teleprompter:
-                if "gpt" in model_name:
-                    self.model = dspy.OpenAI(self.model_name, os.environ['OPENAI_API_KEY'])
-                else:
-                    self.model = dspy.HFModel(self.model_name, model_prompt_template=self.model_prompt_template, model_kwargs={'torch_dtype': torch.bfloat16, 'use_flash_attention_2': True, 'device_map': 'auto'})
-                    self.model.kwargs['pad_token_id'] = self.model.tokenizer.pad_token_id
-                    self.model.kwargs['eos_token_id'] = self.model.tokenizer.eos_token_id
-                dspy.settings.configure(lm=self.model)
+            if "tune" not in optimizer:
+                # TODO switch to using HuggingFace TGI
+                model_kwargs = {
+                    'torch_dtype': torch.bfloat16, 
+                    'use_flash_attention_2': True, 
+                    'trust_remote_code': True, 
+                    'device_map': 'auto',
+                    'token': os.environ['HF_TOKEN']
+                }
+                self.model = LocalModel(self.model_name, model_kwargs=model_kwargs)
+                dspy.configure(lm=self.model)
         
-        self.teleprompter = teleprompter
-        self.teleprompter_settings = {}
+        self.optimizer = optimizer
+        self.optimizer_settings = {}
         self.prompting_method = prompting_method
         self.opinion_method = opinion_method
         self.classifier = None
@@ -361,15 +470,15 @@ class StanceClassifier:
         elif self.backend == 'dspy':
             if self.opinion_method == 'onestep':
                 if is_comment:
-                    return CommentStanceDetectionSignature({'demos':[]})
+                    return CommentStanceDetectionSignature()
                 else:
-                    return PostStanceDetectionSignature({'demos':[]})
+                    return PostStanceDetectionSignature()
             elif self.opinion_method == 'twostep':
-                TwoStepCommentStanceDetectionSignature({'demos': []})
+                TwoStepCommentStanceDetectionSignature()
             elif self.opinion_method == 'yesno':
-                return YesNoCommentStanceDetectionSignature({'demos': []})
+                return YesNoCommentStanceDetectionSignature()
             elif self.opinion_method == 'template':
-                return CommentStanceDetectionTemplateSignature({'demos': []})
+                return CommentStanceDetectionTemplateSignature()
             else:
                 raise ValueError(f"Invalid opinion method: {self.opinion_method}")
 
@@ -412,12 +521,12 @@ class StanceClassifier:
 
                     response = self.classifier(config=config, **input.inputs()._store)
 
-                    extras = {'opinion': response.opinion}
+                    extras = {'stance': response.stance}
                     if 'rationale' in response.keys():
                         extras['rationale'] = response.rationale
                     self._extra_responses.append(extras)
 
-                    stance = _parse_opinion_answer(response.opinion)
+                    stance = _parse_opinion_answer(response.stance)
                 elif self.opinion_method == 'yesno':
                     if self.shot_num == 0:
                         self.agree_classifier = classifier
@@ -425,10 +534,10 @@ class StanceClassifier:
 
                     inputs = input.inputs()._store
                     agree_inputs = inputs.copy()
-                    agree_inputs['target_opinion'] = f"Support for {inputs['target_opinion']}"
+                    agree_inputs['target_opinion'] = f"Support for {inputs['target_stance']}"
                     agree_prediction = self.agree_classifier(config=config, **agree_inputs)
                     disagree_inputs = inputs.copy()
-                    disagree_inputs['target_opinion'] = f"Against {inputs['target_opinion']}"
+                    disagree_inputs['target_opinion'] = f"Against {inputs['target_stance']}"
                     disagree_prediction = self.disagree_classifier(config=config, **disagree_inputs)
 
                     extras = {
@@ -474,7 +583,7 @@ class StanceClassifier:
     def set_target(self, target):
         self.target = target
 
-    def train(self, trainset, valset=None, all_tasks=False, teleprompter_settings={}):
+    def train(self, trainset, valset=None, all_tasks=False, optimizer_settings={}):
 
         self.shot_num = len(trainset)
 
@@ -488,8 +597,8 @@ class StanceClassifier:
             # Validation logic: check that the predicted stance is correct.
             # Also check that the retrieved context does actually contain that stance.
             def validate_context_and_answer(example, pred, trace=None):
-                pred_stance = _parse_opinion_answer(pred.opinion)
-                return example.opinion == pred_stance
+                pred_stance = _parse_opinion_answer(pred.stance)
+                return example.stance == pred_stance
 
         # Compile!
         classifier, config = self._get_classifier()
@@ -500,20 +609,20 @@ class StanceClassifier:
                 super().__init__()
             
             def forward(self, **kwargs):
-                kwargs.update(config)
+                kwargs['config'] = config
                 if self.task_map is not None:
-                    kwargs['task_id'] = self.task_map[kwargs['target_opinion']]
+                    kwargs['task_id'] = self.task_map[kwargs['target_stance']]
                 return self.classifier(**kwargs)
 
         if self.opinion_method == 'yesno':
 
             def convert_inputs(ex, new_set, agree):
                 store = ex._store.copy()
-                store['target_opinion'] = f"Support for {store['target_opinion']}" if agree else f"Against {store['target_opinion']}"
+                store['target_stance'] = f"Support for {store['target_stance']}" if agree else f"Against {store['target_stance']}"
                 stance = 'favor' if agree else 'against'
                 store['answer'] = 'yes' if ex._store['gold_stance'] == stance else 'no'
                 new_ex = dspy.Example(**store)
-                new_set.append(new_ex.with_inputs('post', 'parent_comment', 'comment', 'target_opinion', 'target_explanation'))
+                new_set.append(new_ex.with_inputs('post', 'parent_comment', 'comment', 'target_stance', 'target_explanation'))
 
             agree_trainset = []
             disagree_trainset = []
@@ -527,80 +636,79 @@ class StanceClassifier:
                 convert_inputs(ex, agree_valset, agree=True)
                 convert_inputs(ex, disagree_valset, agree=False)
 
-            # Set up a basic teleprompter, which will compile our RAG program.
+            # Set up a basic optimizer, which will compile our RAG program.
             if len(valset) == 0:
-                if self.teleprompter == 'bootstrap':
-                    teleprompter = BootstrapFewShot(metric=validate_context_and_answer)
-                elif self.teleprompter == 'labelled':
-                    teleprompter = LabeledFewShot(k=len(trainset))
-                self.agree_classifier = teleprompter.compile(StanceModule(), trainset=agree_trainset)
-                self.disagree_classifier = teleprompter.compile(StanceModule(), trainset=disagree_trainset)
+                if self.optimizer == 'bootstrap':
+                    optimizer = BootstrapFewShot(metric=validate_context_and_answer)
+                elif self.optimizer == 'labelled':
+                    optimizer = LabeledFewShot(k=len(trainset))
+                self.agree_classifier = optimizer.compile(StanceModule(), trainset=agree_trainset)
+                self.disagree_classifier = optimizer.compile(StanceModule(), trainset=disagree_trainset)
             else:
-                teleprompter = BootstrapFewShotWithOptuna(metric=validate_context_and_answer)
-                self.agree_classifier = teleprompter.compile(StanceModule(), max_demos=len(agree_trainset), trainset=agree_trainset, valset=agree_valset)
-                self.disagree_classifier = teleprompter.compile(StanceModule(), max_demos=len(disagree_trainset), trainset=disagree_trainset, valset=disagree_valset)
+                optimizer = BootstrapFewShotWithOptuna(metric=validate_context_and_answer)
+                self.agree_classifier = optimizer.compile(StanceModule(), max_demos=len(agree_trainset), trainset=agree_trainset, valset=agree_valset)
+                self.disagree_classifier = optimizer.compile(StanceModule(), max_demos=len(disagree_trainset), trainset=disagree_trainset, valset=disagree_valset)
 
         else:
             for ex in trainset + valset:
-                ex.opinion = ex.gold_stance
+                ex.stance = ex.gold_stance
 
-            if self.teleprompter == 'bootstrap':
-                teleprompter = BootstrapFewShot(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
+            if self.optimizer == 'bootstrap':
+                optimizer = BootstrapFewShot(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
                 args = (StanceModule(),)
                 kwargs = {'trainset': trainset}
-            elif self.teleprompter == 'optuna':
+            elif self.optimizer == 'optuna':
                 assert len(valset) > 0, "Optuna search requires a validation set"
-                teleprompter = BootstrapFewShotWithOptuna(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
+                optimizer = BootstrapFewShotWithOptuna(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset))
                 args = (StanceModule(),)
                 kwargs = {'max_demos': len(trainset), 'trainset': trainset, 'valset': valset}
-            elif self.teleprompter == 'random':
+            elif self.optimizer == 'random':
                 assert len(valset) > 0, "Random search requires a validation set"
-                teleprompter = BootstrapFewShotWithRandomSearch(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset), num_threads=1)
+                optimizer = BootstrapFewShotWithRandomSearch(metric=validate_context_and_answer, max_labeled_demos=len(trainset), max_bootstrapped_demos=len(trainset), num_threads=1)
                 args = (StanceModule(),)
                 kwargs = {'trainset': trainset, 'valset': valset}
-            elif self.teleprompter == 'finetune':
-                teleprompter = tuning.FineTune()
+            elif self.optimizer == 'finetune':
+                optimizer = tuning.FineTune()
                 args = (StanceModule(),)
-                default_teleprompter_settings = {'method': 'ia3', 'lr': 1e-3, 'num_epochs': 50, 'gradient_accumulation_steps': 1}
-                for k, v in default_teleprompter_settings.items():
-                    if k not in teleprompter_settings:
-                        teleprompter_settings[k] = v
-                self.teleprompter_settings = teleprompter_settings
-                kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
-                kwargs.update(self.teleprompter_settings)
-            elif self.teleprompter == 'multitaskfinetune':
-                teleprompter = tuning.FineTune()
+                default_optimizer_settings = {'method': 'ia3', 'lr': 1e-3, 'num_epochs': 10, 'gradient_accumulation_steps': 1}
+                for k, v in default_optimizer_settings.items():
+                    if k not in optimizer_settings:
+                        optimizer_settings[k] = v
+                self.optimizer_settings = optimizer_settings
+                kwargs = {'model_name': self.model_name, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
+                kwargs.update(self.optimizer_settings)
+            elif self.optimizer == 'multitaskfinetune':
+                optimizer = tuning.FineTune()
                 args = (StanceModule(),)
-                default_teleprompter_settings = {'method': 'ia3', 'gradient_accumulation_steps': 1}
-                default_teleprompter_settings['lr'] = 1e-3 if all_tasks else 5e-4
-                default_teleprompter_settings['num_epochs'] = 50 if all_tasks else 10
-                for k, v in default_teleprompter_settings.items():
-                    if k not in teleprompter_settings:
-                        teleprompter_settings[k] = v
-                self.teleprompter_settings = teleprompter_settings
+                default_optimizer_settings = {'method': 'ia3', 'gradient_accumulation_steps': 1}
+                default_optimizer_settings['lr'] = 1e-3 if all_tasks else 5e-4
+                default_optimizer_settings['num_epochs'] = 20 if all_tasks else 10
+                for k, v in default_optimizer_settings.items():
+                    if k not in optimizer_settings:
+                        optimizer_settings[k] = v
+                self.optimizer_settings = optimizer_settings
                 kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
-                kwargs.update(self.teleprompter_settings)
-            elif self.teleprompter == "prompttune":
-                teleprompter = tuning.PromptTune()
+                kwargs.update(self.optimizer_settings)
+            elif self.optimizer == "prompttune":
+                optimizer = tuning.PromptTune()
                 args = (StanceModule(),)
-                self.teleprompter_settings = {'lr': 1e-3, 'num_epochs': 60, 'gradient_accumulation_steps': 8}
+                self.optimizer_settings = {'lr': 1e-3, 'num_epochs': 60, 'gradient_accumulation_steps': 8}
                 kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
-                kwargs.update(self.teleprompter_settings)
-            elif self.teleprompter == 'multitaskprompttune':
-                teleprompter = tuning.MultiTaskPromptTune()
+                kwargs.update(self.optimizer_settings)
+            elif self.optimizer == 'multitaskprompttune':
+                optimizer = tuning.MultiTaskPromptTune()
                 args = (StanceModule(),)
                 num_epochs = 50 if all_tasks else 10
                 lr = 1e-4 if all_tasks else 1e-5
-                self.teleprompter_settings = {'lr': lr, 'num_epochs': num_epochs, 'gradient_accumulation_steps': 8}
+                self.optimizer_settings = {'lr': lr, 'num_epochs': num_epochs, 'gradient_accumulation_steps': 8}
                 kwargs = {'model_name': self.model_name, 'model_prompt_template': self.model_prompt_template, 'trainset': trainset, 'valset': valset, 'all_tasks': all_tasks}
-                kwargs.update(self.teleprompter_settings)
-                task_names = sorted(list(set([ex.target_opinion for ex in trainset + valset])))
+                kwargs.update(self.optimizer_settings)
+                task_names = sorted(list(set([ex.target_stance for ex in trainset + valset])))
                 kwargs['task_map'] = {target: idx for idx, target in enumerate(task_names)}
             else:
-                raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
+                raise ValueError(f"Invalid optimizer: {self.optimizer}")
                 
-            self.classifier = teleprompter.compile(*args, **kwargs)
-            self.checkpoint_path = teleprompter.checkpoint_path
+            self.classifier = optimizer.compile(*args, **kwargs)
 
     def _get_classifier(self, comment=True):
         if self.opinion_method == 'onestep':
@@ -622,25 +730,25 @@ class StanceClassifier:
             if 'gpt' in self.model_name:
                 config = {}
             else:
-                config = {'max_tokens': 4}
+                config = {'max_new_tokens': 1}
         elif self.prompting_method == 'multicomparison':
             classifier = MultiComparison(signature)
             if 'gpt' in self.model_name:
                 config = {}
             else:
-                config = {'max_tokens': 4}
+                config = {'max_new_tokens': 4}
         elif self.prompting_method == 'chainofthought':
             classifier = dspy.ChainOfThought(signature)
             if 'gpt' in self.model_name:
                 config = {}
             else:
-                config = {'max_tokens': 400}
+                config = {'max_new_tokens': 400}
         elif self.prompting_method == 'chainofthoughtstance':
             classifier = ChainOfThoughtForOneStepOpinion(signature)
             if 'gpt' in self.model_name:
                 config = {}
             else:
-                config = {'max_tokens': 400}
+                config = {'max_new_tokens': 400}
         elif self.prompting_method == 'multichaincomparison':
             classifier = MultiChainComparison(signature)
             config = {}
@@ -662,20 +770,20 @@ class StanceClassifier:
             self.classifier.predictors()[0].lm.model.to('cpu')
 
     def load_model(self, model_name, checkpoint_path, trainset):
-        if self.teleprompter == 'finetune':
-            teleprompter = tuning.FineTune()
-        elif self.teleprompter == 'multitaskfinetune':
-            teleprompter = tuning.FineTune()
-        elif self.teleprompter == 'prompttune':
-            teleprompter = tuning.PromptTune()
-        elif self.teleprompter == 'multitaskprompttune':
-            teleprompter = tuning.MultiTaskPromptTune()
+        if self.optimizer == 'finetune':
+            optimizer = tuning.FineTune()
+        elif self.optimizer == 'multitaskfinetune':
+            optimizer = tuning.FineTune()
+        elif self.optimizer == 'prompttune':
+            optimizer = tuning.PromptTune()
+        elif self.optimizer == 'multitaskprompttune':
+            optimizer = tuning.MultiTaskPromptTune()
         else:
-            raise ValueError(f"Invalid teleprompter: {self.teleprompter}")
+            raise ValueError(f"Invalid optimizer: {self.optimizer}")
 
         classifier = self._get_classifier()[0]
         model_prompt_template = self.model_prompt_template
-        self.classifier = teleprompter.load(model_name, checkpoint_path, trainset, classifier, model_prompt_template)
+        self.classifier = optimizer.load(model_name, checkpoint_path, trainset, classifier, model_prompt_template)
     
 def _parse_yesno_answer(response):
     response = response.split('\n')[0].lower()
