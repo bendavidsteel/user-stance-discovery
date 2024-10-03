@@ -44,7 +44,7 @@ def plot(
             max_x = torch.max(train_x)
             start_x = min_x - 0.1 * (max_x - min_x)
             end_x = max_x + 0.1 * (max_x - min_x)
-            test_x = torch.linspace(start_x, end_x, n_test)
+            test_x = torch.linspace(start_x, end_x, n_test).to('cuda')
             test_classifier_ids = torch.zeros(n_test, dtype=torch.long)
             model_pred = model.predict(test_x)
             # likelihood.set_classifier_ids(test_classifier_ids)
@@ -53,11 +53,11 @@ def plot(
             lower, upper = model_pred.confidence_region()
             # Plot predictive means as blue line
             # mean = get_expected_class(model_pred.loc.T)
-            ax.plot(test_x.numpy(), model_pred.loc.numpy(), 'b')
+            ax.plot(test_x.cpu().numpy(), model_pred.loc.cpu().numpy(), 'b')
             # lower = get_expected_class(lower.T)
             # upper = get_expected_class(upper.T)
             # Shade between the lower and upper confidence bounds
-            ax.fill_between(test_x.numpy(), lower.numpy(), upper.numpy(), alpha=0.5)
+            ax.fill_between(test_x.cpu().numpy(), lower.cpu().numpy(), upper.cpu().numpy(), alpha=0.5)
         ax.set_ylim([-3, 3])
         ax.legend(['Observed Data', 'Mean', 'Confidence'])
 
