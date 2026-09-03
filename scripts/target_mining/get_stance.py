@@ -167,15 +167,27 @@ def main(config):
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(stance_detection_finetune_kwargs['model_path'])
 
+    document_df = document_df.with_columns(pl.col('createtime').dt.iso_year().alias('year'),
+                                           pl.col('createtime').dt.week().alias('week'))
+    week_df = document_df.select(['year', 'week']).unique().sort(['year', 'week'], descending=True)
+
+    # one process per GPU, each taking every nth week, so neither touches the other's
+    # output file and each only has to hold its own share of the corpus
+    num_shards = int(config.get('stance_num_shards', 1))
+    shard = int(config.get('stance_shard', 0))
+    if num_shards > 1:
+        week_df = week_df.with_row_index('week_index')\
+            .filter(pl.col('week_index') % num_shards == shard).drop('week_index')
+        document_df = document_df.join(week_df, on=['year', 'week'], how='semi')
+        logger.info(f'Shard {shard} of {num_shards}: {len(week_df)} weeks, {document_df.height} documents.')
+
     # trim to the prompt budget rather than dropping long documents outright
     slim_df = document_df.select(['Document', 'ParentDocument']).with_row_index('row_id')\
         .with_columns(blank_parent_to_null())
     slim_df = truncate_to_sentence(slim_df, 'Document', MAX_DOCUMENT_TOKENS, tokenizer, logger)
     slim_df = truncate_to_sentence(slim_df, 'ParentDocument', MAX_PARENT_TOKENS, tokenizer, logger)
     document_df = document_df.drop(['Document', 'ParentDocument']).with_row_index('row_id')\
-        .join(slim_df, on='row_id', how='left')\
-        .with_columns(pl.col('createtime').dt.iso_year().alias('year'),
-                      pl.col('createtime').dt.week().alias('week'))
+        .join(slim_df, on='row_id', how='left')
     del slim_df
 
     pair_df = document_df.select(['row_id', 'Document', 'ParentDocument', 'Targets'])\
@@ -195,7 +207,6 @@ def main(config):
 
     # batch out calls
     os.makedirs(config.base_stance_path, exist_ok=True)
-    week_df = document_df.select(['year', 'week']).unique().sort(['year', 'week'], descending=True)
     doc_parts = document_df.partition_by(['year', 'week'], as_dict=True)
     pair_parts = pair_df.partition_by(['year', 'week'], as_dict=True)
     # a week whose documents all had empty target lists has no pairs at all
