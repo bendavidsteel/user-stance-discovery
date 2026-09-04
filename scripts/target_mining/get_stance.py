@@ -100,7 +100,7 @@ def load_previous_stances(previous_path: str, logger) -> pl.DataFrame:
 
 
 def write_week_stance(week_df: pl.DataFrame, pair_df: pl.DataFrame, miner: StanceMining,
-                      week_batch_path: str, logger) -> None:
+                      week_batch_path: str, week_probs_path: str, logger) -> None:
     todo_df = pair_df.filter(pl.col('Stance').is_null())
     if not todo_df.is_empty():
         # one classification per distinct (text, parent, target), not per document
@@ -110,24 +110,39 @@ def write_week_stance(week_df: pl.DataFrame, pair_df: pl.DataFrame, miner: Stanc
             .agg(pl.col('Target').alias('Targets'))
         logger.info(f'Classifying {todo_df.height} pairs as {work_df.height} documents, '
                     f'reusing {pair_df.height - todo_df.height}.')
-        stance_df = miner.get_stance(work_df, text_column='Document', parent_text_column='ParentDocument')
-        computed_df = stance_df.explode(['Targets', 'Stances']).drop_nulls('Targets')\
+        stance_df = miner.get_stance(work_df, text_column='Document',
+                                     parent_text_column='ParentDocument', return_probs=True)
+        computed_df = stance_df.explode(['Targets', 'Stances', 'Probs']).drop_nulls('Targets')\
             .rename({'Targets': 'Target'})\
-            .select(stance_key().alias('key'), pl.col('Stances').alias('NewStance'))\
+            .select(stance_key().alias('key'), pl.col('Stances').alias('NewStance'),
+                    pl.col('Probs').alias('NewProbs'))\
             .unique('key')
         pair_df = pair_df.join(computed_df, on='key', how='left')\
-            .with_columns(pl.coalesce(['Stance', 'NewStance']).alias('Stance'))\
-            .drop('NewStance')
+            .with_columns(pl.coalesce(['Stance', 'NewStance']).alias('Stance'),
+                          pl.col('NewProbs').alias('Probs'))\
+            .drop(['NewStance', 'NewProbs'])
 
     missing = pair_df['Stance'].null_count()
     if missing:
         logger.warning(f'{missing} of {pair_df.height} pairs came back without a stance.')
 
-    stance_df = pair_df.group_by('row_id')\
-        .agg(pl.col('Target').alias('Targets'), pl.col('Stance').alias('Stances'))
-    week_df.drop('Targets').join(stance_df, on='row_id', how='left')\
-        .with_columns(pl.col('Targets').fill_null([]), pl.col('Stances').fill_null([]))\
-        .drop(['row_id', 'year', 'week'])\
+    agg_columns = [pl.col('Target').alias('Targets'), pl.col('Stance').alias('Stances')]
+    if 'Probs' in pair_df.columns:
+        agg_columns.append(pl.col('Probs').alias('Probs'))
+    stance_df = pair_df.group_by('row_id').agg(agg_columns)
+    week_stance_df = week_df.drop('Targets').join(stance_df, on='row_id', how='left')\
+        .with_columns(pl.col('Targets').fill_null([]), pl.col('Stances').fill_null([]))
+
+    # kept beside the stance files rather than in them: adding a column partway through a
+    # run leaves the directory with two schemas, which every reader would have to handle
+    if 'Probs' in week_stance_df.columns:
+        os.makedirs(os.path.dirname(week_probs_path), exist_ok=True)
+        week_stance_df.select(['id', 'platform', 'Targets', pl.col('Probs').fill_null([])])\
+            .write_parquet(week_probs_path, compression='zstd')
+        week_stance_df = week_stance_df.drop('Probs')
+
+    # written last, so its presence still means the whole week is done
+    week_stance_df.drop(['row_id', 'year', 'week'])\
         .write_parquet(week_batch_path, compression='zstd')
 
 
@@ -216,14 +231,16 @@ def main(config):
     no_pairs = pair_df.clear()
     del document_df, pair_df
 
+    probs_path = f'{config.base_stance_path}_probs'
     for i, week in enumerate(week_df.to_dicts()):
         week_batch_path = f'{config.base_stance_path}/{week["year"]}_{week["week"]}_doc_targets_with_stance.parquet.zstd'
+        week_probs_path = f'{probs_path}/{week["year"]}_{week["week"]}_doc_targets_stance_probs.parquet.zstd'
         if os.path.exists(week_batch_path):
             continue
         logger.info(f'Processing week {week["week"]} of year {week["year"]}, {i + 1} of {len(week_df)} weeks')
         part_key = (week['year'], week['week'])
         write_week_stance(doc_parts[part_key], pair_parts.get(part_key, no_pairs),
-                          miner, week_batch_path, logger)
+                          miner, week_batch_path, week_probs_path, logger)
 
 
 if __name__ == "__main__":
