@@ -152,7 +152,7 @@ def main(config):
         }
     elif config.stance_target_type == 'noun-phrases':
         stance_detection_finetune_kwargs = {
-            'model_path': '/home/ndg/users/bsteel2/repos/stancemining/models/stancemining/Qwen-Qwen3-4B-Instruct-2507-stance-classification-vast-ezstance-pstance-semeval-mtcsd-ctsdt-catalonia-french-election-head-merged',
+            'model_path': '/home/ndg/users/bsteel2/repos/stancemining/models/stancemining/Qwen-Qwen3.5-4B-stance-classification-vast-ezstance-pstance-semeval-mtcsd-ctsdt-catalonia-french-election-head-merged',
             'classification_method': 'head',
         }
     else:
@@ -163,6 +163,9 @@ def main(config):
     stance_detection_model_kwargs = {
         'max_model_len': MAX_MODEL_LEN,
         'gpu_memory_utilization': float(config.get('stance_gpu_memory_utilization', 0.85)),
+        # experimental for this model's linear attention layers, and it silently
+        # returns content belonging to other prompts
+        'enable_prefix_caching': False,
     }
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(stance_detection_finetune_kwargs['model_path'])
