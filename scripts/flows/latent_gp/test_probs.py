@@ -1,4 +1,10 @@
-"""The soft-evidence path must reduce to the count path on confident data."""
+"""Checks on the soft-evidence observation models.
+
+Two things are pinned here: that the mixture form reduces exactly to the count
+form when the classifier is certain, so 'hard' still reproduces every earlier
+result, and that it recovers a known latent better than labels do when the
+classifier is not. Run the second with `pytest -m slow`.
+"""
 
 import sys
 import os
@@ -141,3 +147,93 @@ def test_soft_counts_recover_the_moment_identity():
     assert np.isclose((s2_sum + s_sum) / 2, fav.sum())
     assert np.isclose((s2_sum - s_sum) / 2, ag.sum())
     assert np.isclose(n - s2_sum, neu.sum())
+
+
+# --------------------------------------------------------------- recovery
+
+M_R, J_R, T_R, K_R, C_R, BIN_DAYS = 25, 15, 40, 3, 1.2, 2
+STRENGTH = 1.5                 # gives ~0.77 argmax accuracy, near this classifier's
+
+
+def _synth_cells(path, strength, seed=0):
+    """Cells whose labels come from a simulated classifier, not from the truth.
+
+    The classifier observes each true label through Gaussian noise and reports
+    the exact posterior under a flat prior, so the probabilities are calibrated
+    and the mixture form is the correct likelihood by construction.
+    """
+    import datetime
+    import polars as pl
+    from scipy.stats import norm
+
+    rng = np.random.default_rng(seed)
+    W = rng.normal(size=(J_R, K_R)) * 0.8
+    b = rng.normal(size=J_R) * 0.3
+    z = np.empty((M_R, T_R, K_R))
+    z[:, :, :2] = rng.normal(size=(M_R, 1, 2))
+    z[:, :, 2] = np.cumsum(rng.normal(scale=0.15, size=(M_R, T_R)), 1)
+
+    L = probs.n_archetypes(6)
+    rows = []
+    t0 = datetime.datetime(2020, 1, 1)
+    for m in range(M_R):
+        rng = np.random.default_rng(1000 + m)
+        for j in range(J_R):
+            n = rng.poisson(6, size=T_R)
+            f = z[m] @ W[j] + b[j]
+            p_neg, p_pos = norm.cdf(-C_R - f), norm.cdf(f - C_R)
+            for t in np.flatnonzero(n > 0):
+                cnt = rng.multinomial(n[t], [p_neg[t], 1 - p_neg[t] - p_pos[t], p_pos[t]])
+                y = np.repeat([0, 1, 2], cnt)
+                e = rng.normal(size=(len(y), 3)) + strength * np.eye(3)[y]
+                w = np.exp(strength * (e - e.max(1, keepdims=True)))
+                q_ord = w / w.sum(1, keepdims=True)
+                lat = np.bincount(probs.assign(q_ord[:, np.argsort(probs.TO_ORDINAL)], 6),
+                                  minlength=L).astype(float)
+                s = np.array([-1.0, 0.0, 1.0])[q_ord.argmax(1)]
+                rows.append([f'seed{m:03d}', f'target{j:02d}',
+                             t0 + datetime.timedelta(days=int(t) * BIN_DAYS),
+                             float(s.sum()), float((s ** 2).sum()), int(n[t])] + lat.tolist())
+    schema = ['SeedName', 'target', 'bin', 's_sum', 's2_sum', 'n'] + [f'q{i}' for i in range(L)]
+    pl.DataFrame(rows, schema=schema, orient='row').write_parquet(path, compression='zstd')
+    return z
+
+
+def _recovery_r2(fitted, true):
+    """Mean R^2 of each true dimension on the fitted basis: rotation-invariant."""
+    X = np.c_[fitted, np.ones(len(fitted))]
+    out = []
+    for k in range(true.shape[1]):
+        y = true[:, k]
+        resid = y - X @ np.linalg.lstsq(X, y, rcond=None)[0]
+        out.append(1 - resid.var() / y.var())
+    return float(np.mean(out))
+
+
+@pytest.mark.slow
+def test_probabilities_recover_the_latent_better_than_labels():
+    import tempfile
+    import splits
+    from latent_gp import LatentConfig, build_latents, coord_cols
+
+    seeds = [f'seed{m:03d}' for m in range(M_R)]
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, 'cells.parquet.zstd')
+        z = _synth_cells(path, STRENGTH)
+
+        got = {}
+        for obs_model in ('hard', 'soft', 'mixture'):
+            out = build_latents(
+                LatentConfig(cells_path=path, n_dims=K_R, n_fast=1, fast_tau=20.0,
+                             bin_factor=1, iters=10, infer_iters=6, min_target_volume=0,
+                             obs_model=obs_model, prob_resolution=6),
+                splits.SplitSpec(holdout_days=30),
+                {s: 'train' for s in seeds}, log=lambda *a: None)
+            m_i = np.array([seeds.index(s) for s in out['filter_value'].to_list()])
+            t_i = ((out['createtime'].to_numpy().astype('datetime64[D]')
+                    - np.datetime64('2020-01-01')).astype(int) // BIN_DAYS)
+            got[obs_model] = _recovery_r2(np.stack(out[coord_cols(K_R)[0]].to_numpy()),
+                                          z[m_i, t_i])
+
+        assert got['mixture'] > got['hard'] + 0.02, got
+        assert got['mixture'] > got['soft'], got

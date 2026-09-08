@@ -149,3 +149,29 @@ def build(stance_dir, probs_dir, parts_dir, cache, resolution=6, log=print):
         return
     build_parts(stance_dir, probs_dir, parts_dir, resolution, log=log)
     merge_parts(parts_dir, cache, log=log)
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--stance-dir', default='data/stance_targets/2022-01-01-onwards_noun_phrase_stance')
+    ap.add_argument('--probs-dir', default=None, help='defaults to <stance-dir>_probs')
+    ap.add_argument('--parts-dir', default='tmp/gpfa_cell_parts')
+    ap.add_argument('--out', default='tmp/gpfa_cells_2022_onwards.parquet.zstd')
+    ap.add_argument('--resolution', type=int, default=6)
+    args = ap.parse_args()
+    probs_dir = args.probs_dir or f'{args.stance_dir}_probs'
+
+    build(args.stance_dir, probs_dir, args.parts_dir, args.out, args.resolution,
+          log=lambda *a: print(*a, flush=True))
+
+    lf = pl.scan_parquet(args.out)
+    print(lf.select(pl.len().alias('cells'), pl.col('n').sum().alias('posts'),
+                    pl.col('SeedName').n_unique().alias('seeds'),
+                    pl.col('target').n_unique().alias('targets'),
+                    pl.col('bin').min().alias('lo'),
+                    pl.col('bin').max().alias('hi')).collect(), flush=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -69,16 +69,33 @@ class LatentConfig:
 
     @property
     def tag(self):
-        """Cache key: everything that changes the fitted latents."""
+        """Cache key: everything that changes the fitted latents.
+
+        Fields the chosen observation model never reads are left out, so a sweep
+        varying a probability setting still hits the cache on the trials that
+        ignore it, instead of refitting the same latents under a new key.
+        """
+        skip = {'cells_path'} | _unused_by(self.obs_model)
         body = '|'.join(f'{f.name}={getattr(self, f.name)}'
-                        for f in dataclasses.fields(self) if f.name != 'cells_path')
+                        for f in dataclasses.fields(self) if f.name not in skip)
         return hashlib.blake2b(body.encode(), digest_size=6).hexdigest()
 
 
 OBS_MODELS = ('hard', 'channel', 'soft', 'mixture')
+_PROB_FIELDS = frozenset({'obs_temperature', 'prob_resolution', 'prob_floor'})
+_CHANNEL_FIELDS = frozenset({'calibration_path'})
 
 
-def _observation(lcfg, df, train_mask):
+def _unused_by(obs_model):
+    if obs_model == 'hard':
+        return _PROB_FIELDS | _CHANNEL_FIELDS
+    if obs_model == 'channel':
+        return _PROB_FIELDS
+    return _CHANNEL_FIELDS
+
+
+def observation(df, train_mask, obs_model, temperature=1.0, resolution=6,
+                floor=0.01, calibration_path=''):
     """Category counts per the observation model, plus its lattice and log ratios.
 
     'soft' and 'mixture' read the same lattice counts, so they differ in the
@@ -86,29 +103,29 @@ def _observation(lcfg, df, train_mask):
     survived quantisation. pi is a property of the classifier and global to the
     fit, so like W and b it is taken from training cells only.
     """
-    if lcfg.obs_model not in OBS_MODELS:
+    if obs_model not in OBS_MODELS:
         raise ValueError(f'obs_model must be one of {OBS_MODELS}')
-    if lcfg.obs_model == 'hard':
+    if obs_model == 'hard':
         return df, None, None
 
-    if lcfg.obs_model == 'channel':
-        if not lcfg.calibration_path:
+    if obs_model == 'channel':
+        if not calibration_path:
             raise ValueError("obs_model 'channel' needs calibration_path: run "
                              'latent_gp.calibrate on a coded sample first')
-        with open(lcfg.calibration_path) as fh:
+        with open(calibration_path) as fh:
             cal = json.load(fh)
         n_arch = calibrate.corner_counts(df['n_neg'].to_numpy(),
                                          df['n_neu'].to_numpy(),
                                          df['n_pos'].to_numpy())
         return df, n_arch, calibrate.channel_log_ratio(cal['confusion'])
 
-    q = probs.archetypes(lcfg.prob_resolution, lcfg.obs_temperature, lcfg.prob_floor)
-    counts = cells.lattice(df, lcfg.prob_resolution)
+    q = probs.archetypes(resolution, temperature, floor)
+    counts = cells.lattice(df, resolution)
     soft = counts @ q
     df = df.with_columns(pl.Series('n_neg', soft[:, 0]),
                          pl.Series('n_neu', soft[:, 1]),
                          pl.Series('n_pos', soft[:, 2]))
-    if lcfg.obs_model == 'soft':
+    if obs_model == 'soft':
         return df, None, None
     tr = soft[train_mask]
     pi = probs.marginal(tr[:, 0], tr[:, 1], tr[:, 2])
@@ -178,7 +195,9 @@ def build_latents(lcfg, spec, seed_split, cache_dir=None, log=print):
     if not train_mask.any():
         raise ValueError('no training cells: check holdout_days against the data span')
 
-    df, n_arch, logL = _observation(lcfg, df, train_mask)
+    df, n_arch, logL = observation(
+        df, train_mask, lcfg.obs_model, lcfg.obs_temperature,
+        lcfg.prob_resolution, lcfg.prob_floor, lcfg.calibration_path)
     tr_arch = None if n_arch is None else n_arch[train_mask]
     d_train = cells.pack(cells.deflate(df.filter(pl.Series(train_mask)), lcfg.rho),
                          meta, tr_arch)

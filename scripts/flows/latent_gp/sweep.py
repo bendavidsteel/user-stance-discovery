@@ -10,6 +10,19 @@ Scored two ways: predictive log-likelihood per post (the ordinal model's own
 metric) and MSE of the predicted cell mean (directly comparable to the
 Gaussian fit).
 
+--obs-model picks how much of the classifier's output the fit sees. Scoring is
+always against the hard labels, whichever is chosen, so the target does not
+move with the model under test.
+
+That makes RPS and LL useless for ranking observation models against each
+other, not merely conservative: a model fitted on the probabilities estimates
+the distribution of the true stance, while the labels it is scored against are
+that distribution convolved with the classifier's error. Deconvolving is
+penalised as miscalibration. Read the Murphy columns instead -- RES is
+discrimination, which is scale-free, and REL is the calibration term that
+absorbs the deconvolution. Within one observation model every column ranks
+priors as usual.
+
 Run as: python -m latent_gp.sweep --data ...
 """
 
@@ -17,7 +30,7 @@ import argparse
 
 import numpy as np
 
-from . import cells, core, metrics
+from . import cells, core, latents, metrics
 from .fit import fit, cell_scores, score, boot
 
 
@@ -36,16 +49,29 @@ def main():
     ap.add_argument('--slow-tau', type=float, default=2560.)
     ap.add_argument('--taus', default=None,
                     help='comma-separated Wiener timescales; skips the Matern configs')
+    ap.add_argument('--obs-model', default='hard', choices=latents.OBS_MODELS)
+    ap.add_argument('--temperature', type=float, default=1.0)
+    ap.add_argument('--resolution', type=int, default=6)
+    ap.add_argument('--calibration', default='')
+    ap.add_argument('--min-target-volume', type=int, default=400)
     args = ap.parse_args()
 
     K = args.dims
-    df, meta = cells.load(args.data, args.bin_factor)
+    df, meta = cells.load(args.data, args.bin_factor,
+                          min_target_volume=args.min_target_volume)
     fc, inte = cells.holdout_masks(df, meta)
-    tr = cells.deflate(df.filter(~fc & ~inte), args.rho)
-    d = cells.pack(tr, meta)
+    train_mask = ~fc & ~inte
+    # built before the observation model touches the counts: the target must not
+    # move with the model under test
     ev_fc, ev_in = cells.eval_set(df.filter(fc)), cells.eval_set(df.filter(inte))
+
+    obs_df, n_arch, logL = latents.observation(
+        df, train_mask, args.obs_model, args.temperature, args.resolution,
+        calibration_path=args.calibration)
+    tr = cells.deflate(obs_df.filter(train_mask), args.rho)
+    d = cells.pack(tr, meta, None if n_arch is None else n_arch[train_mask])
     print(f"M={meta['M']} J={meta['J']} T={meta['T']} K={K} rho={args.rho}  "
-          f"train cells {len(tr)}\n")
+          f"train cells {len(tr)}  obs {args.obs_model}\n")
 
     # Only priors validated against the dense exact posterior are swept; Matern
     # beyond tau=320 and IWP-2 are excluded because the smoother loses accuracy
@@ -110,7 +136,7 @@ def main():
 
     base = {}
     for i, (name, comps) in enumerate(cfgs):
-        r = fit(d, comps, meta['dt'], K, args.iters)
+        r = fit(d, comps, meta['dt'], K, args.iters, logL=logL)
         f = score(r, ev_fc)
         print(f"{name:22} {f['rps']:8.5f} {f['ll']:9.5f} {f['mse']:8.5f}   "
               f"{f['neutrality']['rel']:8.5f} {f['neutrality']['res']:8.5f} "
