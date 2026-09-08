@@ -201,6 +201,11 @@ def latent_config(cfg):
         iters=cfg.latents.iters,
         infer_iters=cfg.latents.infer_iters,
         min_target_volume=cfg.min_target_volume,
+        obs_model=cfg.latents.obs_model,
+        obs_temperature=cfg.latents.obs_temperature,
+        prob_resolution=cfg.latents.prob_resolution,
+        prob_floor=cfg.latents.prob_floor,
+        calibration_path=cfg.latents.calibration_path,
         seed=cfg.latents.seed,
     )
 

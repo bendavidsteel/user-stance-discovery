@@ -10,6 +10,10 @@ then the linear-Gaussian ones.
 `fit` learns the global parameters; `infer` runs the same E-step with them held
 fixed, which is how trajectories outside the training split get a state
 estimate without informing the representation.
+
+`logL` selects the observation model: None uses the three category counts,
+otherwise it is the per-lattice-point log-likelihood-ratio matrix from probs.py
+and the classifier's probabilities are used in full.
 """
 
 import numpy as np
@@ -44,12 +48,13 @@ def _marginal_f(d, W, b, Ez, Ezz, K):
     return m, v
 
 
-def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
+def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0, logL=None):
     """EM with a variational Newton E-step; learns W, b, c and the posterior z."""
     key = jax.random.PRNGKey(seed)
+    obs = ordinal.observation(d, logL)
     W = jax.random.normal(key, (d['J'], K)) / np.sqrt(K)
     b = jnp.zeros(d['J'])
-    c = ordinal.init_threshold(d['n_neg'], d['n_neu'], d['n_pos'])
+    c = obs.init_threshold()
     F, Q, P0, S = core.build_ssm(dt, comps, K)
     Sj = jnp.asarray(S)
     smoother = core.make_smoother(F, Q, P0, S)
@@ -60,7 +65,7 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
     Ez = Ezz = None
 
     for _ in range(n_iter):
-        t_new, nu_new = ordinal.sites_chunked(m_f, v_f, c, d['n_neg'], d['n_neu'], d['n_pos'])
+        t_new, nu_new = obs.sites(m_f, v_f, c)
         if tau is None:
             tau, h = t_new, t_new * nu_new
         else:   # damp in natural parameters, as variational Newton requires
@@ -73,7 +78,7 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
 
         W, b = core.m_step(d, Ez, Ezz, tau, nu, K)
         m_f, v_f = _marginal_f(d, W, b, Ez, Ezz, K)
-        c = ordinal.newton_threshold(m_f, v_f, c, d['n_neg'], d['n_neu'], d['n_pos'])
+        c = obs.threshold_step(m_f, v_f, c)
 
     if not core.is_heterogeneous(comps):
         W, Ez = core.identify(W, Ez, K)
@@ -81,7 +86,7 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
                 Ez=np.asarray(Ez), Ezz=np.asarray(Ezz))
 
 
-def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False):
+def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False, logL=None):
     """E-step only: posterior over z with the global parameters frozen.
 
     Trajectories held out of the fit get their state this way, so their data
@@ -89,6 +94,7 @@ def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False):
     observations up to t.
     """
     W = jnp.asarray(W); b = jnp.asarray(b)
+    obs = ordinal.observation(d, logL)
     F, Q, P0, S = core.build_ssm(dt, comps, K)
     Sj = jnp.asarray(S)
     smoother = core.make_smoother(F, Q, P0, S, filtered=filtered)
@@ -99,7 +105,7 @@ def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False):
     Ez = Ezz = None
 
     for _ in range(n_iter):
-        t_new, nu_new = ordinal.sites_chunked(m_f, v_f, c, d['n_neg'], d['n_neu'], d['n_pos'])
+        t_new, nu_new = obs.sites(m_f, v_f, c)
         if tau is None:
             tau, h = t_new, t_new * nu_new
         else:
