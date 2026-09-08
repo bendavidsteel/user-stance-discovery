@@ -14,7 +14,11 @@ Weeks are aggregated to their own part file, so a rebuild after more weeks
 classify only touches the new ones -- worth having while the classifier is
 still running.
 
-Run on prometheus.
+Run on prometheus, from the repo root, and off the GPU: nothing here needs one,
+and importing the package used to take 2GB from a card that was classifying.
+
+    PYTHONPATH=scripts/flows JAX_PLATFORMS=cpu POLARS_MAX_THREADS=12 \
+        python -m latent_gp.aggregate
 """
 
 import glob
