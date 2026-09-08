@@ -15,6 +15,10 @@ MAX_DOCUMENT_TOKENS = 1400
 MAX_PARENT_TOKENS = 400
 TOKENIZE_CHUNK = 50_000
 
+NOUN_PHRASE_STANCE_MODEL = ('/home/ndg/users/bsteel2/repos/stancemining/models/stancemining/'
+                            'Qwen-Qwen3.5-4B-stance-classification-vast-ezstance-pstance-'
+                            'semeval-mtcsd-ctsdt-catalonia-french-election-head-merged')
+
 SENTENCE_END = r'(?s)^(.*[.!?…。！？])(?:\s|$)'
 LINE_END = r'(?s)^(.*)\n'
 WORD_END = r'(?s)^(.*)\s'
@@ -152,8 +156,11 @@ def main(config):
     pl.set_random_seed(42)
 
     period = '2022-01-01-onwards'
+    doc_targets_path = config.get(
+        'doc_targets_path',
+        f'./data/stance_targets/{period}_{config.stance_target_type}_doc_targets.parquet.zstd')
     document_df = pl.read_parquet(
-        f'./data/stance_targets/{period}_{config.stance_target_type}_doc_targets.parquet.zstd',
+        doc_targets_path,
         columns=['id', 'Document', 'ParentDocument', 'createtime', 'seed', 'Targets', 'finetune_kwargs', 'platform'],
     )
     logger.info(f'Loaded {document_df.height} documents.')
@@ -167,7 +174,7 @@ def main(config):
         }
     elif config.stance_target_type == 'noun-phrases':
         stance_detection_finetune_kwargs = {
-            'model_path': '/home/ndg/users/bsteel2/repos/stancemining/models/stancemining/Qwen-Qwen3.5-4B-stance-classification-vast-ezstance-pstance-semeval-mtcsd-ctsdt-catalonia-french-election-head-merged',
+            'model_path': config.get('stance_model_path', NOUN_PHRASE_STANCE_MODEL),
             'classification_method': 'head',
         }
     else:
@@ -189,6 +196,19 @@ def main(config):
                                            pl.col('createtime').dt.week().alias('week'))
     week_df = document_df.select(['year', 'week']).unique().sort(['year', 'week'], descending=True)
 
+    # a file of "<iso year>_<week>" lines, to reclassify a named set of weeks
+    week_list_path = config.get('stance_week_list')
+    if week_list_path:
+        with open(week_list_path) as f:
+            wanted = [line.strip() for line in f if line.strip()]
+        week_df = week_df.filter(
+            pl.concat_str(['year', 'week'], separator='_').is_in(wanted))
+        missing = set(wanted) - set(week_df.select(
+            pl.concat_str(['year', 'week'], separator='_')).to_series())
+        if missing:
+            raise ValueError(f'{len(missing)} listed weeks are absent from the corpus: {sorted(missing)[:5]}')
+        logger.info(f'Restricted to {len(week_df)} weeks from {week_list_path}.')
+
     # one process per GPU, each taking every nth week, so neither touches the other's
     # output file and each only has to hold its own share of the corpus
     num_shards = int(config.get('stance_num_shards', 1))
@@ -196,7 +216,8 @@ def main(config):
     if num_shards > 1:
         week_df = week_df.with_row_index('week_index')\
             .filter(pl.col('week_index') % num_shards == shard).drop('week_index')
-        document_df = document_df.join(week_df, on=['year', 'week'], how='semi')
+    document_df = document_df.join(week_df, on=['year', 'week'], how='semi')
+    if num_shards > 1:
         logger.info(f'Shard {shard} of {num_shards}: {len(week_df)} weeks, {document_df.height} documents.')
 
     # trim to the prompt budget rather than dropping long documents outright
