@@ -80,6 +80,8 @@ def main():
     ap.add_argument('--holdout-days', type=int, default=182)
     ap.add_argument('--horizon-days', type=float, default=90.0)
     ap.add_argument('--calibration', default='')
+    ap.add_argument('--temperature', type=float, default=1.0,
+                    help='read by soft and mixture only')
     args = ap.parse_args()
 
     spec = splits.SplitSpec(holdout_days=args.holdout_days)
@@ -92,12 +94,15 @@ def main():
             LatentConfig(cells_path=args.path, n_dims=args.n_dims, n_fast=args.n_fast,
                          fast_tau=args.fast_tau, bin_factor=args.bin_factor,
                          interp_days=args.interp_days, min_target_volume=400,
-                         obs_model=obs, calibration_path=args.calibration),
+                         obs_model=obs, obs_temperature=args.temperature,
+                         calibration_path=args.calibration),
             spec, seed_split, log=lambda *a: print('   ', *a, flush=True))
         for filtered in (False, True):
             r = props(df, args.n_dims, args.horizon_days, filtered)
-            rows.append({'obs': obs, 'state': 'causal' if filtered else 'smoothed', **r})
-            print(f'  {rows[-1]["obs"]:8} {rows[-1]["state"]:9} '
+            label = obs if args.temperature == 1.0 else f'{obs}@T{args.temperature:g}'
+            rows.append({'obs': label,
+                         'state': 'causal' if filtered else 'smoothed', **r})
+            print(f'  {rows[-1]["obs"]:12} {rows[-1]["state"]:9} '
                   + '  '.join(f'{k}={v:.4g}' for k, v in r.items()), flush=True)
 
     with pl.Config(tbl_rows=-1, tbl_width_chars=200, float_precision=4):
