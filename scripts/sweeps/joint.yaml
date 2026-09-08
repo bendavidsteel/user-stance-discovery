@@ -75,19 +75,26 @@ parameters:
   # cannot give clean marginals: settle it with a paired rerun of the winning
   # configuration under each value, everything else fixed.
   #
-  # 'channel' is left out until a coding round is drawn from this run -- the
-  # existing coded pairs were coded against target strings that the translate
-  # and consolidate pass has since rewritten, and 15 of 114 still join.
+  # 'channel' reads the finetune's own 16,972-example test confusion matrix,
+  # written beside the checkpoint; latent_gp.calibrate turns it into the file
+  # below. It needs three lattice points rather than 28, so it is much the
+  # cheapest of the three that model classifier error.
   latents.obs_model:
-    values: [hard, soft, mixture]
+    values: [hard, channel, soft, mixture]
+  latents.calibration_path:
+    value: tmp/stance_calibration.json
   # Temperature is only read by soft and mixture, and the cache key knows that,
-  # so hard trials still share a latent fit across its values. Above 1 flattens
-  # an overconfident posterior; the held-out objective is a better judge of it
-  # than a few hundred coded pairs would be.
+  # so hard and channel trials still share a latent fit across its values.
+  #
+  # A calibrated classifier's mean confidence equals its accuracy. On the corpus
+  # the mean is 0.764; the test split's accuracy is 0.740, which implies T=1.12,
+  # and the per-benchmark accuracy spread (0.66 to 0.85) brackets it to roughly
+  # 0.6 to 1.6. So the range sits there rather than reaching to 3, which earlier
+  # would have spent most trials where the calibration rules out.
   latents.obs_temperature:
     distribution: log_uniform_values
-    min: 0.7
-    max: 3.0
+    min: 0.6
+    max: 1.8
 
   # --- latent-GP factor model ---
   # The first sweep put its two best trials at fast_tau=40 and bin_factor=4,

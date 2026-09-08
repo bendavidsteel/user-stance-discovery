@@ -237,3 +237,99 @@ def test_probabilities_recover_the_latent_better_than_labels():
 
         assert got['mixture'] > got['hard'] + 0.02, got
         assert got['mixture'] > got['soft'], got
+
+
+# ------------------------------------------------------------ calibration
+
+# The stance finetune's own table, rows = true label, columns = prediction,
+# in the classifier's (neutral, favor, against) order.
+FINETUNE_COUNTS = [[3710, 577, 475], [723, 4113, 776], [830, 1026, 4742]]
+
+
+def test_confusion_counts_are_permuted_into_ordinal_order():
+    from latent_gp import calibrate
+
+    out = calibrate.from_confusion_counts(FINETUNE_COUNTS)
+    assert out['order'] == ['AGAINST', 'NEUTRAL', 'FAVOR']
+    assert out['n'] == 16972
+    assert np.isclose(out['accuracy'], 12565 / 16972)
+
+    c = np.asarray(out['confusion'])
+    assert np.allclose(c.sum(1), 1.0)
+    # true AGAINST is row 2 of the source, reordered to (against, neutral, favor)
+    assert np.allclose(c[0], np.array([4742, 830, 1026]) / 6598)
+    assert np.allclose(c[1], np.array([475, 3710, 577]) / 4762)
+    assert np.allclose(c[2], np.array([776, 723, 4113]) / 5612)
+
+
+def test_channel_log_ratio_reads_the_prediction_column():
+    from latent_gp import calibrate
+
+    c = np.asarray(calibrate.from_confusion_counts(FINETUNE_COUNTS)['confusion'])
+    logL = calibrate.channel_log_ratio(c)
+    for lattice_index, ordinal_class in enumerate(calibrate.corner_order()):
+        assert np.allclose(logL[lattice_index], np.log(c[:, ordinal_class]))
+
+
+def test_channel_with_a_perfect_classifier_is_the_count_likelihood():
+    """An identity channel claims no error, so it must reduce to hard labels."""
+    from latent_gp import calibrate
+
+    rng = np.random.default_rng(3)
+    n_cells, c = 40, 0.65
+    m = jnp.asarray(rng.normal(0, 1.0, n_cells))
+    v = jnp.asarray(rng.uniform(0.1, 0.7, n_cells))
+    counts = rng.integers(1, 15, (n_cells, 3)).astype(float)      # neg, neu, pos
+
+    n_arch = calibrate.corner_counts(counts[:, 0], counts[:, 1], counts[:, 2])
+    logL = calibrate.channel_log_ratio(np.eye(3))
+
+    tau_c, nu_c = ordinal.sites(m, v, c, *(jnp.asarray(counts[:, k]) for k in range(3)))
+    tau_m, nu_m = ordinal.mixture_sites(m, v, c, jnp.asarray(n_arch), jnp.asarray(logL))
+
+    assert np.allclose(np.asarray(tau_m), np.asarray(tau_c), rtol=1e-9, atol=1e-10)
+    assert np.allclose(np.asarray(nu_m), np.asarray(nu_c), rtol=1e-9, atol=1e-10)
+
+
+def test_a_noisier_channel_shrinks_the_site_precision():
+    """More assumed classifier error must mean each post carries less weight."""
+    from latent_gp import calibrate
+
+    rng = np.random.default_rng(4)
+    n_cells, c = 40, 0.65
+    m = jnp.asarray(rng.normal(0, 1.0, n_cells))
+    v = jnp.asarray(rng.uniform(0.1, 0.7, n_cells))
+    counts = rng.integers(2, 15, (n_cells, 3)).astype(float)
+    n_arch = jnp.asarray(calibrate.corner_counts(counts[:, 0], counts[:, 1], counts[:, 2]))
+
+    def precision(accuracy):
+        off = (1 - accuracy) / 2
+        C = np.full((3, 3), off) + np.eye(3) * (accuracy - off)
+        tau, _ = ordinal.mixture_sites(m, v, c, n_arch,
+                                       jnp.asarray(calibrate.channel_log_ratio(C)))
+        return float(np.asarray(tau).sum())
+
+    assert precision(0.99) > precision(0.85) > precision(0.74) > precision(0.5)
+
+
+def test_a_saturated_cell_leaves_the_state_alone():
+    """Far from the transition, a bounded likelihood must contribute nothing.
+
+    Otherwise the site has a live gradient and no curvature, and the smoother
+    divides by that precision.
+    """
+    from latent_gp import calibrate
+
+    C = calibrate.from_confusion_counts(FINETUNE_COUNTS)['confusion']
+    logL = jnp.asarray(calibrate.channel_log_ratio(C))
+    n_arch = jnp.asarray(calibrate.corner_counts(*[np.array([20.0])] * 3))
+
+    far = jnp.asarray([60.0])
+    v = jnp.asarray([1.0])
+    tau, nu = ordinal.mixture_sites(far, v, 0.8, n_arch, logL)
+    assert float(tau[0]) == pytest.approx(ordinal.INERT_PRECISION, rel=1e-9)
+    assert float(nu[0]) == pytest.approx(float(far[0]), rel=1e-9)
+
+    near = jnp.asarray([0.0])
+    tau_near, _ = ordinal.mixture_sites(near, v, 0.8, n_arch, logL)
+    assert float(tau_near[0]) > 1e-3, 'a cell in the transition must stay informative'

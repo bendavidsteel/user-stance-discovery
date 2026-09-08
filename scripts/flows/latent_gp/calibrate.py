@@ -4,12 +4,25 @@ Two artefacts the latent-GP fit can consume, both in ordinal order
 (against, neutral, favor):
 
   temperature   one parameter, T > 1 flattening an overconfident posterior.
-                Cheap in gold labels, and it keeps the per-post information the
-                probabilities carry.
-  confusion     P(classifier label | coded label), the classic
-                misclassification channel. Uses labels only, so it says nothing
-                about which posts were hard, but it is what a few hundred coded
-                pairs can actually support.
+                Needs per-example probabilities and their true labels, and it
+                keeps the per-post information the probabilities carry.
+  confusion     P(classifier label | true label), the classic misclassification
+                channel. Uses labels only, so it says nothing about which posts
+                were hard, but it needs no probabilities.
+
+The confusion table can come from two places. The stance model's own held-out
+test split is by far the larger, and the finetune writes it to a metadata.json
+beside the checkpoint -- pass --metadata. Manually coded pairs from the study
+corpus are the smaller but in-domain source -- pass --coded.
+
+Rows are normalised, so the table is P(prediction | truth), which transfers
+across a change in class prior. That matters here: the benchmark test split is
+close to balanced while the corpus is about half neutral, and a joint table
+would carry the benchmark's prior into the corpus.
+
+What it does not survive is a change in difficulty. Per-benchmark accuracy runs
+from 0.66 to 0.85, so the corpus's own error rate is only bracketed by this
+table, not measured -- which is what the coded pairs are for.
 
 score_coded_posts.py is the report -- accuracy, per-class F1, agreement,
 reliability. This module writes only what the model reads.
@@ -86,6 +99,39 @@ def corner_counts(n_neg, n_neu, n_pos):
     return out
 
 
+def from_confusion_counts(counts, order=probs.CLASSIFIER_ORDER, smoothing=0.0):
+    """Calibration artefact from a confusion table of counts.
+
+    `counts[i][j]` counts examples whose true label is `order[i]` and whose
+    predicted label is `order[j]`, which is the orientation the stance model's
+    test metrics use.
+    """
+    raw = np.asarray(counts, dtype=np.float64)
+    if raw.shape != (3, 3):
+        raise ValueError(f'expected a 3x3 table, got {raw.shape}')
+    perm = [list(order).index(s) for s in ORDINAL]
+    c = raw[np.ix_(perm, perm)] + smoothing
+    row = c / c.sum(1, keepdims=True)
+    return {
+        'n': int(raw.sum()),
+        'accuracy': float(np.trace(raw) / raw.sum()),
+        'confusion': row.tolist(),
+        'recall': np.diag(row).tolist(),
+        'order': ORDINAL,
+        'source_order': list(order),
+    }
+
+
+def from_metadata(path):
+    """Confusion table from the finetune's metadata.json beside a checkpoint."""
+    with open(path) as fh:
+        meta = json.load(fh)
+    counts = meta['test_metrics']['test/confusion_matrix']
+    out = from_confusion_counts(counts)
+    out['source'] = path
+    return out
+
+
 def report(q, gold):
     T, nll_T, nll_1 = fit_temperature(q, gold)
     y = _gold_index(gold)
@@ -136,13 +182,21 @@ def load_coded(coded_paths, probs_dir):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('-i', '--coded', action='append', required=True,
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--metadata', help="the finetune's metadata.json")
+    ap.add_argument('-i', '--coded', action='append',
                     help='CSV exported by the coding page')
-    ap.add_argument('--probs-dir', required=True)
+    ap.add_argument('--probs-dir')
     ap.add_argument('--out', required=True)
     ap.add_argument('--min-pairs', type=int, default=100)
     args = ap.parse_args()
+
+    if args.metadata:
+        out = from_metadata(args.metadata)
+        _write(out, args.out)
+        return
+    if not (args.coded and args.probs_dir):
+        raise SystemExit('give either --metadata, or --coded with --probs-dir')
 
     j, q = load_coded(args.coded, args.probs_dir)
     print(f'coded pairs joined to the run: {len(j)}')
@@ -153,9 +207,12 @@ def main():
             f'from an earlier run will not join; draw a fresh sample with '
             f'sample_classified_posts.py and code that.')
 
-    out = report(q, j['coded_stance'].to_list())
-    os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
-    with open(args.out, 'w') as fh:
+    _write(report(q, j['coded_stance'].to_list()), args.out)
+
+
+def _write(out, path):
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'w') as fh:
         json.dump(out, fh, indent=2)
     print(json.dumps(out, indent=2))
 

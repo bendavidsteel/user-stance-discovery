@@ -20,7 +20,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-jax.config.update('jax_enable_x64', True)   # float32 is not survivable here
+from . import _jax  # noqa: F401  -- enables x64 before any array is created
 
 JITTER = 1e-12
 SMOOTH_JITTER = 1e-10

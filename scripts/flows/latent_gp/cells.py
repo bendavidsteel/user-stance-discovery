@@ -18,6 +18,8 @@ import numpy as np
 import polars as pl
 import jax.numpy as jnp
 
+from . import _jax  # noqa: F401  -- x64 before the first array
+
 from . import probs as probs_mod
 
 ARCH_RE = re.compile(r'^q(\d+)$')

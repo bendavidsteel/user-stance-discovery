@@ -17,6 +17,8 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import log_ndtr, logsumexp
 
+from . import _jax  # noqa: F401  -- x64 before the first array
+
 GH_N = 12
 _x, _w = np.polynomial.hermite_e.hermegauss(GH_N)
 GH_X = jnp.asarray(_x)
@@ -140,9 +142,15 @@ def init_threshold(n_neg, n_neu, n_pos):
 # log p(cell | f) = sum_l n_l * log sum_k exp(logL[l,k]) P(k | f)
 #
 # This form is not log-concave in f: a post that rules out the middle category
-# but splits between the ends gives P(-1|f) + P(+1|f), which is convex. That is
-# the right shape for such a post, and the site precision floor turns the
-# affected cells into a curvature-free gradient push rather than a bad step.
+# but splits between the ends gives P(-1|f) + P(+1|f), which is convex. It is
+# also bounded, so once the classifier's error rate can explain a cell outright
+# the likelihood goes flat and the cell stops saying anything about f.
+#
+# A flat cell has to contribute nothing, not a little. The smoother works in
+# information form and recovers the mean by dividing by the precision, so a
+# site with a live gradient and near-zero curvature is an unbounded
+# pseudo-observation, and one iteration of those sends the latent scale to
+# hundreds while W collapses to compensate.
 
 
 def mixture_expected_loglik(m, v, c, n_arch, logL):
@@ -162,12 +170,19 @@ _m_dc = jax.grad(_mix_total, argnums=2)
 _m_dcc = jax.grad(_m_dc, argnums=2)
 
 
+# Small enough to be negligible against a prior precision of order one, so a
+# site pinned here is inert rather than merely weak.
+INERT_PRECISION = 1e-6
+
+
 @jax.jit
 def mixture_sites(m, v, c, n_arch, logL):
+    """Gaussian site, with cells whose likelihood has gone flat left inert."""
     g1 = _m_d1(m, v, c, n_arch, logL)
     g2 = _m_d2(m, v, c, n_arch, logL)
-    tau = jnp.maximum(-g2, 1e-8)
-    return tau, m + g1 / tau
+    informative = g2 < -INERT_PRECISION
+    tau = jnp.where(informative, -g2, INERT_PRECISION)
+    return tau, jnp.where(informative, m + g1 / tau, m)
 
 
 @jax.jit
