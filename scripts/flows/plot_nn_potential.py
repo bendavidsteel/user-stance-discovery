@@ -17,6 +17,7 @@ from tqdm import tqdm
 from plnn.models import DeepTimePhiPLNN
 from plnn.pl.plot_plnn import compute_grad_phi
 
+import latent_space
 from nn_potential import INITIAL_DATE, UNIT_DAYS
 from pca_density import create_kde_background, get_top_component_features, format_pca_axis_label
 
@@ -642,7 +643,7 @@ def main(cfg):
     # Load dimension labels if available
     trend_path = cfg.trend_path
     trend_name = os.path.basename(trend_path.rstrip('/'))
-    dimension_labels_path = os.path.join(trend_path, f'{cfg.dim_reduction_method}_dimension_labels.json')
+    dimension_labels_path = os.path.join(trend_path, f'{latent_space.name(cfg)}_dimension_labels.json')
     dimension_labels = load_dimension_labels(dimension_labels_path)
 
     # with jax.default_device(jax.devices("cpu")[0]):

@@ -7,7 +7,8 @@ The split applies at two levels, and conflating them is what leaks:
 
   W, b, c   the global representation -- fit on training trajectories inside
             the training period only, because these are shared across seeds
-            and so can carry held-out information into every prediction.
+            and so can carry held-out information into every prediction. W is
+            the per-target loading matrix, exported by `build_loadings`.
 
   z_m(t)    per-seed state -- inferred for every trajectory over the whole
             period with the global parameters frozen. This is measurement, not
@@ -71,6 +72,31 @@ class LatentConfig:
             if cast is not None:
                 object.__setattr__(self, f.name, cast(getattr(self, f.name)))
 
+    @classmethod
+    def from_cfg(cls, cfg):
+        """Read the hydra config, where n_dims and min_target_volume are top level."""
+        return cls(
+            cells_path=cfg.latents.cells_path,
+            n_dims=cfg.n_dims,
+            n_fast=cfg.latents.n_fast,
+            fast_tau=cfg.latents.fast_tau,
+            fast_kind=cfg.latents.fast_kind,
+            slow_kind=cfg.latents.slow_kind,
+            slow_tau=cfg.latents.slow_tau,
+            bin_factor=cfg.latents.bin_factor,
+            interp_days=cfg.latents.interp_days,
+            rho=cfg.latents.rho,
+            iters=cfg.latents.iters,
+            infer_iters=cfg.latents.infer_iters,
+            min_target_volume=cfg.min_target_volume,
+            obs_model=cfg.latents.obs_model,
+            obs_temperature=cfg.latents.obs_temperature,
+            prob_resolution=cfg.latents.prob_resolution,
+            prob_floor=cfg.latents.prob_floor,
+            calibration_path=cfg.latents.calibration_path,
+            seed=cfg.latents.seed,
+        )
+
     @property
     def tag(self):
         """Cache key: everything that changes the fitted latents.
@@ -85,6 +111,9 @@ class LatentConfig:
                         for f in dataclasses.fields(self) if f.name not in skip)
         return hashlib.blake2b(body.encode(), digest_size=6).hexdigest()
 
+
+# the two frames one fit produces, as indices into what _fit returns
+LATENTS, LOADINGS = 0, 1
 
 OBS_MODELS = ('hard', 'channel', 'soft', 'mixture')
 _PROB_FIELDS = frozenset({'obs_temperature', 'prob_resolution', 'prob_floor'})
@@ -188,21 +217,79 @@ def _standardise(Ez, train_cells):
     return mu, sd
 
 
+def _loading_frame(meta, W, b, mu, sd):
+    """Per-target loadings in the units the exported latent is reported in.
+
+    The frame carries (z - mu) / sd, so the loadings that reconstruct a cell's
+    f from those coordinates are W * sd with mu folded into the intercept. In
+    the fit's own units they are off by a per-dimension factor -- invisible
+    within a dimension, wrong across them.
+    """
+    return pl.DataFrame({
+        'target': meta['targets'],
+        'loading': W * sd,
+        'intercept': b + W @ mu,
+    })
+
+
+def _cache_paths(lcfg, spec, cache_dir):
+    """Where this configuration's latents and loadings live, or (None, None)."""
+    if not cache_dir:
+        return None, None
+    key = f'{lcfg.tag}_{data_tag(lcfg.cells_path)}_{spec.tag}'
+    return (os.path.join(cache_dir, f'latents_{key}.parquet.zstd'),
+            os.path.join(cache_dir, f'loadings_{key}.parquet.zstd'))
+
+
 def build_latents(lcfg, spec, seed_split, cache_dir=None, log=print):
     """Fit the latent-GP factor model under `spec` and return per-bin states.
 
     `seed_split` maps trajectory id -> 'train' / 'val' / 'test'. Returns a frame
     of (createtime, filter_value, coord, causal coord, posterior sd, n_posts).
     """
-    cache = None
-    if cache_dir:
-        cache = os.path.join(
-            cache_dir,
-            f'latents_{lcfg.tag}_{data_tag(lcfg.cells_path)}_{spec.tag}.parquet.zstd')
-        if os.path.exists(cache):
-            log(f'reusing cached latents {cache}')
-            return pl.read_parquet(cache)
+    return _build(lcfg, spec, seed_split, cache_dir, log, LATENTS)
 
+
+def build_loadings(lcfg, spec, seed_split, cache_dir=None, log=print):
+    """Per-target loadings from the same fit: (target, loading, intercept).
+
+    One row per target surviving min_target_volume, in the order W was fitted
+    in, so `loading_matrix` can hand the pair to code written against PCA
+    components. Reported in the units build_latents reports, not the fit's.
+    """
+    return _build(lcfg, spec, seed_split, cache_dir, log, LOADINGS)
+
+
+def _build(lcfg, spec, seed_split, cache_dir, log, want):
+    """Whichever output was asked for, refitting only when that one is absent.
+
+    Latents cached before the loadings existed are still valid on their own, so
+    asking for them never refits for the sake of the sibling file.
+    """
+    paths = _cache_paths(lcfg, spec, cache_dir)
+    if paths[want] and os.path.exists(paths[want]):
+        log(f'reusing cached {paths[want]}')
+        return pl.read_parquet(paths[want])
+
+    built = _fit(lcfg, spec, seed_split, log)
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        for path, frame in zip(paths, built):
+            frame.write_parquet(path, compression='zstd')
+    return built[want]
+
+
+def loading_matrix(loadings):
+    """(K, J) loadings and the target names indexing their columns.
+
+    Transposed from the fit's (J, K) W: dimension-first is the orientation PCA
+    components come in, and what the analysis scripts index by.
+    """
+    return loadings['loading'].to_numpy().T, loadings['target'].to_list()
+
+
+def _fit(lcfg, spec, seed_split, log):
+    """Returns (per-bin states, per-target loadings)."""
     df, meta = cells.load(lcfg.cells_path, lcfg.bin_factor,
                           min_target_volume=lcfg.min_target_volume)
     K = lcfg.n_dims
@@ -251,10 +338,7 @@ def build_latents(lcfg, spec, seed_split, cache_dir=None, log=print):
     out = out.join(pl.DataFrame({'filter_value': list(seed_split),
                                  'traj_split': list(seed_split.values())}),
                    on='filter_value', how='left')
-    if cache:
-        os.makedirs(cache_dir, exist_ok=True)
-        out.write_parquet(cache, compression='zstd')
-    return out
+    return out, _loading_frame(meta, r['W'], r['b'], mu, sd)
 
 
 def _fine_grid(lo, hi, step):

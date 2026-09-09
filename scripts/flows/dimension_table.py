@@ -5,6 +5,8 @@ import os
 
 import hydra
 
+import latent_space
+
 TABLE_END = """    \\bottomrule
 \\end{tabularx}"""
 
@@ -18,7 +20,7 @@ def main(cfg):
     dir_name = f"{trend_name}/all"
 
     # Save dimension labels to file
-    dim_label_path = os.path.join(trend_path, f'{cfg.dim_reduction_method}_dimension_labels.json')
+    dim_label_path = os.path.join(trend_path, f'{latent_space.name(cfg)}_dimension_labels.json')
     with open(dim_label_path, 'r') as f:
         dimension_labels = json.load(f)
 

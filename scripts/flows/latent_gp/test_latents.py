@@ -20,7 +20,8 @@ from scipy.stats import norm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import splits                                  # noqa: E402
-from latent_gp import LatentConfig, build_latents, coord_cols   # noqa: E402
+from latent_gp import (LatentConfig, build_latents, build_loadings,   # noqa: E402
+                       coord_cols, loading_matrix)
 
 M, J, T, K_TRUE, C_TRUE = 40, 25, 60, 3, 1.2
 BIN_DAYS = 2
@@ -157,9 +158,49 @@ def main():
               f'max |delta| at original bin centres {d:.2e}')
         assert d < 1e-12, d
 
+        check_loadings(td, clean, spec, seed_split, lcfg_kw, W, b, z)
         check_rolling_origin(td, seed_split, lcfg_kw)
 
     print('\nall latent-pipeline checks passed')
+
+
+def check_loadings(td, clean, spec, seed_split, lcfg_kw, W_true, b_true, z_true):
+    """The exported loadings must reconstruct the cell scores the fit models.
+
+    A cell's score f is invariant to the latent basis, unlike W and z
+    separately, so it is the one thing that can be compared against the truth
+    whatever the axes came out as -- and reconstructing it from the *exported*
+    coordinates is what catches loadings left in the fit's own units.
+    """
+    cache = os.path.join(td, 'loading_cache')
+    lcfg = LatentConfig(cells_path=clean, **lcfg_kw)
+    seen = []
+    kw = dict(cache_dir=cache, log=lambda *a: seen.append(' '.join(map(str, a))))
+
+    loadings = build_loadings(lcfg, spec, seed_split, **kw)
+    written = sorted(f.split('_')[0] for f in os.listdir(cache))
+    assert written == ['latents', 'loadings'], written
+
+    # one fit serves both, so asking for the sibling must not refit
+    seen.clear()
+    a = build_latents(lcfg, spec, seed_split, **kw)
+    assert any('reusing cached' in m for m in seen), seen
+
+    assert loadings['target'].to_list() == [f'target{j:02d}' for j in range(J)]
+    assert loadings['loading'].dtype == pl.Array(pl.Float64, 3), loadings['loading'].dtype
+    dim_first, targets = loading_matrix(loadings)
+    assert dim_first.shape == (3, J), dim_first.shape
+    assert targets == loadings['target'].to_list()
+
+    coords = np.stack(a.sort(['filter_value', 'createtime'])[coord_cols(3)[0]]
+                      .to_numpy()).reshape(M, -1, 3)
+    assert coords.shape == z_true.shape, (coords.shape, z_true.shape)
+    f_hat = np.einsum('mtk,jk->mtj', coords, loadings['loading'].to_numpy()) \
+        + loadings['intercept'].to_numpy()
+    f_true = np.einsum('mtk,jk->mtj', z_true, W_true) + b_true
+    r = float(np.corrcoef(f_hat.ravel(), f_true.ravel())[0, 1])
+    print(f'cell-score correlation with truth: {r:.3f}')
+    assert r > 0.9, f'loadings do not reconstruct the cell scores ({r:.3f})'
 
 
 def check_rolling_origin(td, seed_split, lcfg_kw):

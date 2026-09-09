@@ -67,6 +67,14 @@ class SplitSpec:
         if self.origin_offset_days < 0:
             raise ValueError('origin_offset_days must be non-negative')
 
+    @classmethod
+    def from_cfg(cls, cfg):
+        return cls(holdout_days=cfg.split.holdout_days,
+                   origin_offset_days=cfg.split.origin_offset_days,
+                   train_frac=cfg.split.train_frac,
+                   val_frac=cfg.split.val_frac,
+                   seed=cfg.split.seed)
+
     @property
     def test_frac(self):
         return 1.0 - self.train_frac - self.val_frac
@@ -98,6 +106,12 @@ def assign_trajectory_split(filter_values, spec):
         u < spec.train_frac, 'train',
         np.where(u < spec.train_frac + spec.val_frac, 'val', 'test'))
     return pl.DataFrame({'filter_value': values, 'traj_split': label})
+
+
+def seed_split(filter_values, spec):
+    """`assign_trajectory_split` as the id -> split dict the latent fit takes."""
+    traj = assign_trajectory_split(filter_values, spec)
+    return dict(zip(traj['filter_value'].to_list(), traj['traj_split'].to_list()))
 
 
 def time_window(times, spec):

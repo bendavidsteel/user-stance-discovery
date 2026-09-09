@@ -179,39 +179,6 @@ def build_training_pairs(cfg, target_df, smooth=True, max_step_days=10):
     return paired
 
 
-def split_spec(cfg):
-    """The nested trajectory x time split this run is allowed to see."""
-    return splits.SplitSpec(holdout_days=cfg.split.holdout_days,
-                            origin_offset_days=cfg.split.origin_offset_days,
-                            train_frac=cfg.split.train_frac,
-                            val_frac=cfg.split.val_frac,
-                            seed=cfg.split.seed)
-
-
-def latent_config(cfg):
-    return LatentConfig(
-        cells_path=cfg.latents.cells_path,
-        n_dims=cfg.n_dims,
-        n_fast=cfg.latents.n_fast,
-        fast_tau=cfg.latents.fast_tau,
-        fast_kind=cfg.latents.fast_kind,
-        slow_kind=cfg.latents.slow_kind,
-        slow_tau=cfg.latents.slow_tau,
-        bin_factor=cfg.latents.bin_factor,
-        interp_days=cfg.latents.interp_days,
-        rho=cfg.latents.rho,
-        iters=cfg.latents.iters,
-        infer_iters=cfg.latents.infer_iters,
-        min_target_volume=cfg.min_target_volume,
-        obs_model=cfg.latents.obs_model,
-        obs_temperature=cfg.latents.obs_temperature,
-        prob_resolution=cfg.latents.prob_resolution,
-        prob_floor=cfg.latents.prob_floor,
-        calibration_path=cfg.latents.calibration_path,
-        seed=cfg.latents.seed,
-    )
-
-
 def load_latent_df(cfg, spec):
     """Trajectories in latent space, fitted inside the split boundary.
 
@@ -222,10 +189,8 @@ def load_latent_df(cfg, spec):
     if cfg.latents.method != 'gpfa':
         return load_target_df(cfg)
 
-    lcfg = latent_config(cfg)
-    traj = splits.assign_trajectory_split(gp_cells.seed_names(lcfg.cells_path), spec)
-    seed_split = dict(zip(traj['filter_value'].to_list(),
-                          traj['traj_split'].to_list()))
+    lcfg = LatentConfig.from_cfg(cfg)
+    seed_split = splits.seed_split(gp_cells.seed_names(lcfg.cells_path), spec)
     df = build_latents(lcfg, spec, seed_split, cache_dir=cfg.latents.cache_dir,
                        log=logger.info)
 
@@ -247,10 +212,10 @@ def run_dir(cfg):
     if cfg.platform != 'all':
         parts.append(cfg.platform)
     if cfg.latents.method == 'gpfa':
-        parts.append(f'gpfa{latent_config(cfg).tag}')
+        parts.append(f'gpfa{LatentConfig.from_cfg(cfg).tag}')
     elif cfg.rolling_mean_window != 100:
         parts.append(f'rm{cfg.rolling_mean_window}')
-    parts.append(split_spec(cfg).tag)
+    parts.append(splits.SplitSpec.from_cfg(cfg).tag)
     return os.path.join('.', 'out', trend_name, '_'.join(parts))
 
 
@@ -548,7 +513,7 @@ def write_scenario_metrics(results, cfg, dir_path, prefix):
                  n_dims=cfg.n_dims, n_fast=cfg.latents.n_fast,
                  fast_tau=cfg.latents.fast_tau, fast_kind=cfg.latents.fast_kind,
                  slow_kind=cfg.latents.slow_kind,
-                 latent_tag=latent_config(cfg).tag, **m)
+                 latent_tag=LatentConfig.from_cfg(cfg).tag, **m)
             for name, m in results.items()]
     if not rows:
         return
@@ -628,7 +593,7 @@ def main(cfg):
     wandb.init(project=project_name, config=wandb_config)
 
     n_dims = cfg.n_dims
-    spec = split_spec(cfg)
+    spec = splits.SplitSpec.from_cfg(cfg)
     dir_path = run_dir(cfg)
     logger.info(f'split {spec}  ->  {dir_path}')
 

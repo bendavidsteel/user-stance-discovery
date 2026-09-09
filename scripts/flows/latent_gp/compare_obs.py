@@ -85,8 +85,7 @@ def main():
     args = ap.parse_args()
 
     spec = splits.SplitSpec(holdout_days=args.holdout_days)
-    traj = splits.assign_trajectory_split(gp_cells.seed_names(args.path), spec)
-    seed_split = dict(zip(traj['filter_value'].to_list(), traj['traj_split'].to_list()))
+    seed_split = splits.seed_split(gp_cells.seed_names(args.path), spec)
 
     rows = []
     for obs in args.obs_models.split(','):

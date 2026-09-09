@@ -45,9 +45,11 @@ def make_cfg(cells_path, cache_dir):
                   'val_frac': 0.10, 'seed': 42},
         'latents': {
             'method': 'gpfa', 'cells_path': cells_path, 'cache_dir': cache_dir,
-            'bin_factor': 1, 'interp_days': 1.0, 'n_fast': 1, 'fast_tau': 20.0, 'slow_kind': 'const',
-            'slow_tau': 2560.0, 'rho': 0.0, 'iters': 8, 'infer_iters': 5,
-            'causal_state': False, 'seed': 0,
+            'bin_factor': 1, 'interp_days': 1.0, 'n_fast': 1, 'fast_tau': 20.0,
+            'fast_kind': 'wiener', 'slow_kind': 'const', 'slow_tau': 2560.0,
+            'rho': 0.0, 'iters': 8, 'infer_iters': 5, 'causal_state': False,
+            'obs_model': 'hard', 'obs_temperature': 1.0, 'prob_resolution': 6,
+            'prob_floor': 0.01, 'calibration_path': '', 'seed': 0,
         },
     })
 
@@ -99,7 +101,7 @@ def main():
         cells = os.path.join(td, 'cells.parquet.zstd')
         synth(cells)
         cfg = make_cfg(cells, os.path.join(td, 'cache'))
-        spec = nnp.split_spec(cfg)
+        spec = splits.SplitSpec.from_cfg(cfg)
 
         target_df = nnp.load_latent_df(cfg, spec)
         assert target_df['filter_value'].n_unique() == M

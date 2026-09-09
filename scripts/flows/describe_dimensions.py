@@ -1,4 +1,3 @@
-import datetime
 import json
 import logging
 import os
@@ -12,6 +11,8 @@ from toponymy import KeyphraseBuilder, ClusterLayerText
 from toponymy.embedding_wrappers import VLLMEmbedder
 from toponymy.llm_wrappers import AsyncVLLMNamer
 
+import latent_space
+from latent_space import COORD
 from pca_density import get_top_component_features, format_pca_axis_label
 
 logger = logging.getLogger(__name__)
@@ -333,9 +334,8 @@ def get_dimension_descriptions(target_df: pl.DataFrame, pca_features, cfg):
         text_df = text_df.join(embeddings_df, on=['id', 'Document'], how='left')
 
     # Extract dimensions as separate columns for easier filtering
-    coords_col_name = target_df.columns[-1]
-    num_dims = target_df.schema[coords_col_name].shape[0]
-    target_df = target_df.with_columns([pl.col(coords_col_name).arr.get(i).alias(f'dim_{i}') for i in range(num_dims)])
+    num_dims = target_df.schema[COORD].shape[0]
+    target_df = target_df.with_columns([pl.col(COORD).arr.get(i).alias(f'dim_{i}') for i in range(num_dims)])
 
     dimension_labels = {}
 
@@ -397,49 +397,18 @@ def main(cfg):
     keywords = None
     dir_name = f"{trend_name}/all"
 
-    target_head_df = pl.read_parquet(os.path.join(trend_path, 'pivoted_and_imputed.parquet.zstd'), n_rows=1)
-    target_df = pl.read_parquet(os.path.join(trend_path, f'{cfg.dim_reduction_method}_coords.parquet.zstd'))
-    coord_col = [col for col in target_df.columns if col.startswith('coord_')][0]
-
-    target_df = target_df.filter(pl.col('createtime') >= datetime.datetime(2022, 1, 1))
-
-    # Apply rolling average to smooth coordinates
-    n_dims = target_df.schema[coord_col].shape[0]
-    target_df = target_df \
-        .sort(['filter_value', 'createtime']) \
-        .with_columns([
-            pl.col(coord_col).arr.get(i).alias(f'dim_{i}') for i in range(n_dims)
-        ]) \
-        .rolling('createtime', period=f'{cfg.rolling_mean_window}d', group_by='filter_value') \
-        .agg([pl.col(f'dim_{i}').mean() for i in range(n_dims)]) \
-        .with_columns(
-            pl.concat_arr([f'dim_{i}' for i in range(n_dims)]).alias(coord_col)
-        ) \
-        .drop([f'dim_{i}' for i in range(n_dims)]) \
-        .drop_nulls(coord_col)
+    target_df, components, targets = latent_space.load(cfg)
+    n_dims = target_df.schema[COORD].shape[0]
 
     # get var(diff(coord)) for each dimension
     coord_diff_var = target_df.sort(['filter_value', 'createtime'])\
         .with_columns([
-            pl.col(coord_col).arr.get(i).diff().over('filter_value').alias(f'dim_{i}_diff') for i in range(n_dims)
+            pl.col(COORD).arr.get(i).diff().over('filter_value').alias(f'dim_{i}_diff') for i in range(n_dims)
         ])\
         .select([pl.col(f'dim_{i}_diff').var() for i in range(n_dims)])\
         .to_numpy()[0]
-    
 
-    component_df = pl.read_parquet(os.path.join(trend_path, f'{cfg.dim_reduction_method}_metadata.parquet.zstd'))
-    stance_cols = [col for col in target_head_df.columns if col not in ['createtime', 'filter_value', coord_col]]
-   
-    if cfg.dim_reduction_method == 'sfa':
-        components = component_df.filter(pl.col('n_components') == n_dims)['W'][0].to_numpy()
-    elif cfg.dim_reduction_method in ['pca', 'ppca', 'pica']:
-        components = np.stack(component_df.filter(pl.col('n_dims') == n_dims)['components'][0].to_numpy())
-    else:
-        raise ValueError(f"Unknown dim_reduction_method: {cfg.dim_reduction_method}")
-
-    assert len(stance_cols) == components.shape[1]
-
-    component_features = get_top_component_features(components, stance_cols, n_features=100)
+    component_features = get_top_component_features(components, targets, n_features=100)
 
     # Get dimension descriptions
     dimension_labels = get_dimension_descriptions(target_df, component_features, cfg)
@@ -448,7 +417,7 @@ def main(cfg):
         dimension_labels[dim]['variance_of_derivative'] = float(coord_diff_var[dim])
 
     # Save dimension labels to file
-    dim_label_path = os.path.join(trend_path, f'{cfg.dim_reduction_method}_dimension_labels.json')
+    dim_label_path = os.path.join(trend_path, f'{latent_space.name(cfg)}_dimension_labels.json')
     with open(dim_label_path, 'w') as f:
         json.dump(dimension_labels, f, indent=2)
 
