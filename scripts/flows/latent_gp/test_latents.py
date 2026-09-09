@@ -26,12 +26,17 @@ M, J, T, K_TRUE, C_TRUE = 40, 25, 60, 3, 1.2
 BIN_DAYS = 2
 
 
-def synth(path, flip_seeds=()):
+def synth(path, flip_seeds=(), flip_after=None):
     """Cells from a known factor model: 2 frozen dimensions plus one drifting.
 
     Each seed draws from its own stream, so flipping one seed cannot perturb
     another through the shared generator -- otherwise the leakage check below
     would be measuring the sampler, not the model.
+
+    `flip_after` reverses every seed from that bin on, which is how the rolling
+    origin is checked: a fold must not notice it. It is applied to the drawn
+    counts rather than to f, because the seed's stream is shared across targets
+    and resampling would perturb bins before the flip as well.
     """
     rng = np.random.default_rng(0)
     W = rng.normal(size=(J, K_TRUE)) * 0.8
@@ -58,8 +63,16 @@ def synth(path, flip_seeds=()):
                              t0 + datetime.timedelta(days=int(t) * BIN_DAYS),
                              float(counts[2] - counts[0]),
                              float(counts[2] + counts[0]), int(n[t])))
-    pl.DataFrame(rows, schema=['SeedName', 'target', 'bin', 's_sum', 's2_sum', 'n'],
-                 orient='row').write_parquet(path, compression='zstd')
+    df = pl.DataFrame(rows, orient='row',
+                      schema=['SeedName', 'target', 'bin', 's_sum', 's2_sum', 'n'])
+    if flip_after is not None:
+        # f -> -f swaps the outer categories under a symmetric threshold, so
+        # negating s_sum is itself a draw from the flipped model
+        cut = t0 + datetime.timedelta(days=flip_after * BIN_DAYS)
+        df = df.with_columns(pl.when(pl.col('bin') >= cut)
+                               .then(-pl.col('s_sum'))
+                               .otherwise(pl.col('s_sum')).alias('s_sum'))
+    df.write_parquet(path, compression='zstd')
     return W, b, z
 
 
@@ -144,7 +157,54 @@ def main():
               f'max |delta| at original bin centres {d:.2e}')
         assert d < 1e-12, d
 
+        check_rolling_origin(td, seed_split, lcfg_kw)
+
     print('\nall latent-pipeline checks passed')
+
+
+def check_rolling_origin(td, seed_split, lcfg_kw):
+    """A rolled-back origin must not see the data after its window.
+
+    The perturbation lands entirely past the window's end, so the fold's
+    coordinates have to come out bit-identical -- and the control confirms the
+    same perturbation does move an unrolled run, which is what makes that
+    meaningful.
+    """
+    # bin centres are t0 + 2t + 1 days, so a 40-day offset over 60 bins ends
+    # the window at bin 40 and the perturbation starts well past it
+    spec = splits.SplitSpec(holdout_days=30, origin_offset_days=40)
+    flip_after = 45
+
+    clean = os.path.join(td, 'clean.parquet.zstd')
+    late = os.path.join(td, 'late.parquet.zstd')
+    synth(late, flip_after=flip_after)
+
+    c_coord = coord_cols(3)[0]
+    key = ['filter_value', 'createtime']
+
+    def coords(path, sp):
+        got = run(path, sp, seed_split, LatentConfig(cells_path=path, **lcfg_kw))
+        return got.select(key + [c_coord])
+
+    a, bb = coords(clean, spec), coords(late, spec)
+    assert len(a) == len(bb), (len(a), len(bb))
+    j = a.join(bb.rename({c_coord: 'other'}), on=key, how='inner')
+    assert len(j) == len(a), (len(j), len(a))
+    rolled = float(np.abs(np.stack(j[c_coord].to_numpy())
+                          - np.stack(j['other'].to_numpy())).max())
+
+    full = splits.SplitSpec(holdout_days=30)
+    u, v = coords(clean, full), coords(late, full)
+    ju = u.join(v.rename({c_coord: 'other'}), on=key, how='inner')
+    unrolled = float(np.abs(np.stack(ju[c_coord].to_numpy())
+                            - np.stack(ju['other'].to_numpy())).max())
+
+    print(f'rows kept: {len(a)} rolled vs {len(u)} unrolled')
+    print(f'max |delta| from a post-window flip: rolled {rolled:.3e}, '
+          f'unrolled {unrolled:.3e}')
+    assert len(a) < len(u), 'the rolled origin kept just as many bins'
+    assert rolled < 1e-9, f'data past the window end reached the fold ({rolled:.2e})'
+    assert unrolled > 1e-3, f'the flip moves nothing even unrolled ({unrolled:.2e})'
 
 
 if __name__ == '__main__':

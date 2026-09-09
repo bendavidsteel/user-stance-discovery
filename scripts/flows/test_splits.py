@@ -101,9 +101,67 @@ def test_time_split_keys_on_target():
     print(f'{len(straddling)} straddling pairs all labelled out-of-time')
 
 
+# 20-day steps, so enough points to outlast the deepest offset plus a window
+ROLLING_SPAN = 100
+
+
+def test_origin_offset_moves_the_window():
+    """Rolling the origin back shifts both edges and discards the remainder."""
+    pairs = make_pairs(n_per=ROLLING_SPAN)
+    last = pairs['future_createtime'].max()
+    for offset in splits.ORIGIN_OFFSET_DAYS:
+        spec = splits.SplitSpec(holdout_days=365, origin_offset_days=offset)
+        cutoff, end = splits.time_window(pairs['future_createtime'], spec)
+        assert (last - end).days == offset
+        assert (end - cutoff).days == 365
+
+        labelled = splits.label_pairs(pairs, spec)
+        assert labelled['future_createtime'].max() <= end
+        assert len(labelled) == len(pairs.filter(
+            pl.col('future_createtime') <= end))
+        print(f'origin -{offset:4d}d  window {cutoff:%Y-%m-%d} to {end:%Y-%m-%d}  '
+              f'pairs {len(labelled):6d} of {len(pairs)}')
+
+
+def test_rolling_folds_are_leak_free():
+    """Every fold: training precedes its window, and nothing beyond it is scored."""
+    pairs = make_pairs(n_per=ROLLING_SPAN)
+    for offset in splits.ORIGIN_OFFSET_DAYS:
+        spec = splits.SplitSpec(holdout_days=365, origin_offset_days=offset)
+        cutoff, end = splits.time_window(pairs['future_createtime'], spec)
+        labelled = splits.label_pairs(pairs, spec)
+        train = splits.training_rows(labelled)
+        assert len(train) > 0, f'offset {offset} leaves no training period'
+        assert train[splits.TARGET_TIME].max() < cutoff
+
+        for traj in splits.TRAJ_SPLITS:
+            for time in splits.TIME_SPLITS:
+                cell = splits.select(labelled, traj, time)
+                splits.check_leakage(train, cell, splits.scenario_name(traj, time))
+
+        out = splits.select(labelled, splits.TRAJ_SPLITS, 'out')
+        assert out[splits.TARGET_TIME].min() >= cutoff
+        assert out[splits.TARGET_TIME].max() <= end
+        print(f'origin -{offset:4d}d  train {len(train):6d}  scored {len(out):6d}')
+
+
+def test_default_origin_is_unchanged():
+    """The unrolled default must key the same cache and keep every pair."""
+    pairs = make_pairs()
+    spec = splits.SplitSpec(holdout_days=365)
+    assert spec.origin_offset_days == 0
+    assert spec.tag == 'h365_tr0.7_va0.1_s42', spec.tag
+    assert len(splits.label_pairs(pairs, spec)) == len(pairs)
+    assert splits.SplitSpec(holdout_days=365, origin_offset_days=182).tag \
+        == 'h365_o182_tr0.7_va0.1_s42'
+    print(f'default tag {spec.tag} unchanged, all {len(pairs)} pairs kept')
+
+
 if __name__ == '__main__':
     for fn in (test_fractions, test_assignment_is_stable_under_filtering,
                test_seed_changes_assignment, test_labels_and_leakage,
-               test_leakage_check_actually_fires, test_time_split_keys_on_target):
+               test_leakage_check_actually_fires, test_time_split_keys_on_target,
+               test_origin_offset_moves_the_window,
+               test_rolling_folds_are_leak_free, test_default_origin_is_unchanged):
         fn()
     print('\nall split checks passed')

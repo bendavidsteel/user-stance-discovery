@@ -41,7 +41,8 @@ def make_cfg(cells_path, cache_dir):
     return OmegaConf.create({
         'n_dims': 3, 'platform': 'all', 'min_target_volume': 0,
         'rolling_mean_window': 292, 'trend_path': './data/trends',
-        'split': {'holdout_days': 30, 'train_frac': 0.70, 'val_frac': 0.10, 'seed': 42},
+        'split': {'holdout_days': 30, 'origin_offset_days': 0, 'train_frac': 0.70,
+                  'val_frac': 0.10, 'seed': 42},
         'latents': {
             'method': 'gpfa', 'cells_path': cells_path, 'cache_dir': cache_dir,
             'bin_factor': 1, 'interp_days': 1.0, 'n_fast': 1, 'fast_tau': 20.0, 'slow_kind': 'const',

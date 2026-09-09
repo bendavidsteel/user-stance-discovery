@@ -9,8 +9,12 @@ patience: 10
 
 # Nested trajectory x time split. Trajectories are hashed into train/val/test;
 # a pair is out-of-time when its target t1 lands in the last holdout_days.
+# origin_offset_days > 0 moves the window back from the end of the data and
+# discards everything after it -- one fold of a rolling holdout. See
+# rolling_holdout.py; a single run leaves it at 0.
 split:
   holdout_days: 365
+  origin_offset_days: 0
   train_frac: 0.70
   val_frac: 0.10
   seed: 42

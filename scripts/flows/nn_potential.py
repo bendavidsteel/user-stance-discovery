@@ -182,6 +182,7 @@ def build_training_pairs(cfg, target_df, smooth=True, max_step_days=10):
 def split_spec(cfg):
     """The nested trajectory x time split this run is allowed to see."""
     return splits.SplitSpec(holdout_days=cfg.split.holdout_days,
+                            origin_offset_days=cfg.split.origin_offset_days,
                             train_frac=cfg.split.train_frac,
                             val_frac=cfg.split.val_frac,
                             seed=cfg.split.seed)
@@ -539,10 +540,15 @@ def write_scenario_metrics(results, cfg, dir_path, prefix):
     The rolling-holdout comparison needs these across runs, and reading them
     back from disk keeps it independent of whether wandb was reachable.
     """
+    # latent_tag identifies the configuration exactly, so a rolling scan can
+    # tell its own folds apart from every other run left under out/
     rows = [dict(scenario=name, prefix=prefix,
-                 holdout_days=cfg.split.holdout_days, n_dims=cfg.n_dims,
-                 n_fast=cfg.latents.n_fast, fast_tau=cfg.latents.fast_tau,
-                 slow_kind=cfg.latents.slow_kind, **m)
+                 holdout_days=cfg.split.holdout_days,
+                 origin_offset_days=cfg.split.origin_offset_days,
+                 n_dims=cfg.n_dims, n_fast=cfg.latents.n_fast,
+                 fast_tau=cfg.latents.fast_tau, fast_kind=cfg.latents.fast_kind,
+                 slow_kind=cfg.latents.slow_kind,
+                 latent_tag=latent_config(cfg).tag, **m)
             for name, m in results.items()]
     if not rows:
         return

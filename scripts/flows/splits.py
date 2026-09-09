@@ -4,9 +4,14 @@ Trajectories are split train/val/test by a hash of their id rather than by
 position in a shuffled list, so the assignment survives any upstream filtering
 (platform, minimum volume) instead of shifting when the seed set changes.
 
-Time is split by a holdout window at the end of the data. A pair counts as
-out-of-time when its *target* t1 falls in the holdout, which is what keeps
-every training target inside the training period even for long horizons.
+Time is split by a holdout window. A pair counts as out-of-time when its
+*target* t1 falls in the holdout, which is what keeps every training target
+inside the training period even for long horizons.
+
+The window sits at the end of the data by default. `origin_offset_days` moves
+its right edge back and discards everything after it, so the fit cannot see
+past the window it is scored on -- which is what makes a rolling-origin
+evaluation a forecast at every origin rather than only at the last one.
 
 Crossing the two gives the scenarios the evaluation reports separately:
 
@@ -32,9 +37,14 @@ TRAJ_SPLITS = ('train', 'val', 'test')
 TARGET_TIME = 'target_time'
 TIME_SPLITS = ('in', 'out')
 
-# Rolling holdout windows, in days. Reported together they describe how
+# Holdout window lengths, in days. Reported together they describe how
 # predictive performance decays as the unseen period lengthens.
 HOLDOUT_DAYS = (91, 182, 365, 730)
+
+# Origins for a rolling evaluation, as days trimmed from the end of the data.
+# Half-year strides against a ~4.5 year span, so consecutive windows overlap:
+# the folds are not independent, but the alternative is two of them.
+ORIGIN_OFFSET_DAYS = (0, 182, 365, 547, 730)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -42,6 +52,7 @@ class SplitSpec:
     """Everything that determines which rows a model is allowed to see."""
 
     holdout_days: int
+    origin_offset_days: int = 0
     train_frac: float = 0.70
     val_frac: float = 0.10
     seed: int = 42
@@ -53,6 +64,8 @@ class SplitSpec:
             raise ValueError('train_frac + val_frac leaves no test trajectories')
         if self.holdout_days <= 0:
             raise ValueError('holdout_days must be positive')
+        if self.origin_offset_days < 0:
+            raise ValueError('origin_offset_days must be non-negative')
 
     @property
     def test_frac(self):
@@ -61,7 +74,10 @@ class SplitSpec:
     @property
     def tag(self):
         """Short identifier for run directories and cache keys."""
-        return (f'h{self.holdout_days}_tr{self.train_frac:g}'
+        # only extended when rolling, so existing runs and the latent cache
+        # they share keep their key
+        origin = f'_o{self.origin_offset_days}' if self.origin_offset_days else ''
+        return (f'h{self.holdout_days}{origin}_tr{self.train_frac:g}'
                 f'_va{self.val_frac:g}_s{self.seed}')
 
 
@@ -84,26 +100,40 @@ def assign_trajectory_split(filter_values, spec):
     return pl.DataFrame({'filter_value': values, 'traj_split': label})
 
 
-def time_cutoff(times, spec):
-    """Start of the holdout window: the last observation minus holdout_days."""
+def time_window(times, spec):
+    """The holdout window, as (cutoff, end).
+
+    `end` is where the data is treated as stopping. At the default offset that
+    is the last observation, so the window is the tail of the data.
+    """
     last = max(times) if not isinstance(times, pl.Series) else times.max()
-    return last - datetime.timedelta(days=spec.holdout_days)
+    end = last - datetime.timedelta(days=spec.origin_offset_days)
+    return end - datetime.timedelta(days=spec.holdout_days), end
 
 
-def label_pairs(pairs, spec, cutoff=None, time_col='future_createtime'):
+def time_cutoff(times, spec):
+    """Start of the holdout window."""
+    return time_window(times, spec)[0]
+
+
+def label_pairs(pairs, spec, cutoff=None, time_col='future_createtime', end=None):
     """Stamp traj_split and time_split onto a (t0, x0, t1, x1) frame.
 
     time_split keys off the pair's target time, so a pair that starts before
-    the cutoff and lands after it is out-of-time.
+    the cutoff and lands after it is out-of-time. Pairs landing past the
+    window's end are dropped rather than labelled: at a rolled-back origin they
+    are the future this fold is not allowed to be scored on.
     """
     if time_col not in pairs.columns:
         raise ValueError(f'{time_col!r} missing; pair builders must keep the '
                          'target timestamp to assign time_split on t1')
-    if cutoff is None:
-        cutoff = time_cutoff(pairs[time_col], spec)
+    auto_cutoff, auto_end = time_window(pairs[time_col], spec)
+    cutoff = auto_cutoff if cutoff is None else cutoff
+    end = auto_end if end is None else end
 
     traj = assign_trajectory_split(pairs['filter_value'].unique().to_list(), spec)
-    return pairs.with_columns(pl.col('filter_value').cast(pl.String)) \
+    return pairs.filter(pl.col(time_col) <= end) \
+        .with_columns(pl.col('filter_value').cast(pl.String)) \
         .join(traj, on='filter_value', how='left') \
         .with_columns(
             pl.col(time_col).alias(TARGET_TIME),

@@ -124,18 +124,40 @@ def bin_times(meta):
             for t in range(meta['T'])]
 
 
-def cutoff_bin(meta, holdout_days):
-    """First bin index inside the holdout window.
+def cutoff_bin(meta, holdout_days, origin_offset_days=0):
+    """First bin index inside the holdout window, and the cutoff date.
 
     Bins are assigned by their centre, so a bin straddling the cutoff falls on
     whichever side holds most of its posts.
     """
     times = bin_times(meta)
-    cutoff = times[-1] - datetime.timedelta(days=holdout_days)
+    cutoff = times[-1] - datetime.timedelta(days=origin_offset_days + holdout_days)
     for t, ts in enumerate(times):
         if ts >= cutoff:
             return t, cutoff
     return meta['T'], cutoff
+
+
+def window_end_bin(meta, origin_offset_days=0):
+    """One past the last bin inside the holdout window."""
+    times = bin_times(meta)
+    end = times[-1] - datetime.timedelta(days=origin_offset_days)
+    for t, ts in enumerate(times):
+        if ts > end:
+            return t
+    return meta['T']
+
+
+def truncate(df, meta, t_end):
+    """Drop bins from t_end on and shrink the grid to match.
+
+    A rolled-back origin has to look like the data stopping there. Leaving the
+    later bins in place would let the smoother carry them back into states
+    inside the window, which is the leak the origin offset exists to prevent.
+    """
+    if t_end >= meta['T']:
+        return df, meta
+    return df.filter(pl.col('t') < t_end), dict(meta, T=int(t_end))
 
 
 def holdout_masks(df, meta, frac=0.15, seed=0):

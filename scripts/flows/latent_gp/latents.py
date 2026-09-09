@@ -18,6 +18,9 @@ The smoothed state at t depends on observations after t, which inflates skill
 at horizons short relative to the latent's own timescale. `causal_*` columns
 hold the filtered state instead, which has no such dependence.
 
+A rolled-back origin (`spec.origin_offset_days`) also truncates the grid at the
+window's end, so neither state sees past the period being scored.
+
 `obs_model` chooses how much of the stance classifier's output the fit sees:
 its label ('hard'), its label through a measured error channel ('channel'), its
 probabilities as expected counts ('soft'), or its probabilities as soft
@@ -203,7 +206,11 @@ def build_latents(lcfg, spec, seed_split, cache_dir=None, log=print):
     df, meta = cells.load(lcfg.cells_path, lcfg.bin_factor,
                           min_target_volume=lcfg.min_target_volume)
     K = lcfg.n_dims
-    t_cut, cutoff = cells.cutoff_bin(meta, spec.holdout_days)
+    # both bin indices come from the untruncated grid, then the grid is cut to
+    # the window's end so no state is informed by anything after it
+    t_cut, cutoff = cells.cutoff_bin(meta, spec.holdout_days, spec.origin_offset_days)
+    t_end = cells.window_end_bin(meta, spec.origin_offset_days)
+    df, meta = cells.truncate(df, meta, t_end)
     is_train = np.array([seed_split.get(s, 'test') == 'train' for s in meta['seeds']])
     log(f"M={meta['M']} J={meta['J']} T={meta['T']} K={K} "
         f"train seeds {int(is_train.sum())} cutoff {cutoff:%Y-%m-%d} (bin {t_cut})")
@@ -216,7 +223,8 @@ def build_latents(lcfg, spec, seed_split, cache_dir=None, log=print):
     t_arr = df['t'].to_numpy()
     train_mask = is_train[m_arr] & (t_arr < t_cut)
     if not train_mask.any():
-        raise ValueError('no training cells: check holdout_days against the data span')
+        raise ValueError('no training cells: check holdout_days and '
+                         'origin_offset_days against the data span')
 
     df, n_arch, logL = observation(
         df, train_mask, lcfg.obs_model, lcfg.obs_temperature,
