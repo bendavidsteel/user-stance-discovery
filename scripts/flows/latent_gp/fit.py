@@ -10,6 +10,10 @@ then the linear-Gaussian ones.
 `fit` learns the global parameters; `infer` runs the same E-step with them held
 fixed, which is how trajectories outside the training split get a state
 estimate without informing the representation.
+
+`logL` selects the observation model: None uses the three category counts,
+otherwise it is the per-lattice-point log-likelihood-ratio matrix from probs.py
+and the classifier's probabilities are used in full.
 """
 
 import numpy as np
@@ -19,15 +23,19 @@ import jax.numpy as jnp
 from . import core, metrics, ordinal
 
 
-def prior_components(K, n_fast, fast_tau, slow_kind='const', slow_tau=2560.0, var=1.0):
+def prior_components(K, n_fast, fast_tau, slow_kind='const', slow_tau=2560.0, var=1.0,
+                     fast_kind='wiener'):
     """Per-dimension prior: n_fast drifting dimensions, the rest slow or frozen.
 
     Homogeneous mixes are returned in the shared form, which leaves the latent
     basis free to rotate; a genuine mix is per-dimension and so fixes the basis.
+
+    A drifting dimension is a Wiener or an OU: both are rough, and they differ
+    in whether the level is confined.
     """
-    fast = dict(kind='wiener', tau=float(fast_tau), var=var)
+    fast = dict(kind=fast_kind, tau=float(fast_tau), var=var)
     slow = (dict(kind='const', var=var) if slow_kind == 'const'
-            else dict(kind='wiener', tau=float(slow_tau), var=var))
+            else dict(kind=slow_kind, tau=float(slow_tau), var=var))
     if n_fast <= 0:
         return [slow]
     if n_fast >= K:
@@ -36,20 +44,31 @@ def prior_components(K, n_fast, fast_tau, slow_kind='const', slow_tau=2560.0, va
 
 
 def _marginal_f(d, W, b, Ez, Ezz, K):
+    """Mean and variance of f per cell.
+
+    The quadratic form is accumulated a term at a time. Gathering the whole
+    (cells, K, K) posterior covariance is the largest array in the fit -- on
+    the finest grid several times the size of everything else -- and it is only
+    ever contracted down to one number per cell.
+    """
     Wj = W[d['j']]
-    ez = Ez.reshape(-1, K)[d['flat']]
-    cov = Ezz.reshape(-1, K, K)[d['flat']]
-    m = (Wj * ez).sum(-1) + b[d['j']]
-    v = jnp.maximum(jnp.einsum('ci,cij,cj->c', Wj, cov, Wj), 1e-10)
-    return m, v
+    ez = Ez.reshape(-1, K)
+    zz = Ezz.reshape(-1, K, K)
+    m = (Wj * ez[d['flat']]).sum(-1) + b[d['j']]
+    v = jnp.zeros(d['flat'].shape[0])
+    for i in range(K):
+        for j in range(K):
+            v = v + Wj[:, i] * zz[d['flat'], i, j] * Wj[:, j]
+    return m, jnp.maximum(v, 1e-10)
 
 
-def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
+def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0, logL=None):
     """EM with a variational Newton E-step; learns W, b, c and the posterior z."""
     key = jax.random.PRNGKey(seed)
+    obs = ordinal.observation(d, logL)
     W = jax.random.normal(key, (d['J'], K)) / np.sqrt(K)
     b = jnp.zeros(d['J'])
-    c = ordinal.init_threshold(d['n_neg'], d['n_neu'], d['n_pos'])
+    c = obs.init_threshold()
     F, Q, P0, S = core.build_ssm(dt, comps, K)
     Sj = jnp.asarray(S)
     smoother = core.make_smoother(F, Q, P0, S)
@@ -60,7 +79,7 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
     Ez = Ezz = None
 
     for _ in range(n_iter):
-        t_new, nu_new = ordinal.sites_chunked(m_f, v_f, c, d['n_neg'], d['n_neu'], d['n_pos'])
+        t_new, nu_new = obs.sites(m_f, v_f, c)
         if tau is None:
             tau, h = t_new, t_new * nu_new
         else:   # damp in natural parameters, as variational Newton requires
@@ -73,7 +92,7 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
 
         W, b = core.m_step(d, Ez, Ezz, tau, nu, K)
         m_f, v_f = _marginal_f(d, W, b, Ez, Ezz, K)
-        c = ordinal.newton_threshold(m_f, v_f, c, d['n_neg'], d['n_neu'], d['n_pos'])
+        c = obs.threshold_step(m_f, v_f, c)
 
     if not core.is_heterogeneous(comps):
         W, Ez = core.identify(W, Ez, K)
@@ -81,7 +100,7 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0):
                 Ez=np.asarray(Ez), Ezz=np.asarray(Ezz))
 
 
-def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False):
+def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False, logL=None):
     """E-step only: posterior over z with the global parameters frozen.
 
     Trajectories held out of the fit get their state this way, so their data
@@ -89,6 +108,7 @@ def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False):
     observations up to t.
     """
     W = jnp.asarray(W); b = jnp.asarray(b)
+    obs = ordinal.observation(d, logL)
     F, Q, P0, S = core.build_ssm(dt, comps, K)
     Sj = jnp.asarray(S)
     smoother = core.make_smoother(F, Q, P0, S, filtered=filtered)
@@ -99,7 +119,7 @@ def infer(d, comps, dt, K, W, b, c, n_iter=15, damping=0.6, filtered=False):
     Ez = Ezz = None
 
     for _ in range(n_iter):
-        t_new, nu_new = ordinal.sites_chunked(m_f, v_f, c, d['n_neg'], d['n_neu'], d['n_pos'])
+        t_new, nu_new = obs.sites(m_f, v_f, c)
         if tau is None:
             tau, h = t_new, t_new * nu_new
         else:
@@ -121,7 +141,11 @@ def predict(r, ev):
     W, b, Ez, Ezz = r['W'], r['b'], r['Ez'], r['Ezz']
     Wj = W[ev['j']]
     m = (Wj * Ez[ev['m'], ev['t']]).sum(-1) + b[ev['j']]
-    v = np.maximum(np.einsum('ci,cij,cj->c', Wj, Ezz[ev['m'], ev['t']], Wj), 1e-10)
+    v = np.zeros(len(Wj))
+    for i in range(Wj.shape[1]):        # as in _marginal_f, to bound the gather
+        for j in range(Wj.shape[1]):
+            v += Wj[:, i] * Ezz[ev['m'], ev['t'], i, j] * Wj[:, j]
+    v = np.maximum(v, 1e-10)
     return tuple(np.asarray(x) for x in ordinal.predictive_chunked(
         jnp.asarray(m), jnp.asarray(v), r['c']))
 

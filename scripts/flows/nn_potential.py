@@ -193,6 +193,7 @@ def latent_config(cfg):
         n_dims=cfg.n_dims,
         n_fast=cfg.latents.n_fast,
         fast_tau=cfg.latents.fast_tau,
+        fast_kind=cfg.latents.fast_kind,
         slow_kind=cfg.latents.slow_kind,
         slow_tau=cfg.latents.slow_tau,
         bin_factor=cfg.latents.bin_factor,
@@ -201,6 +202,11 @@ def latent_config(cfg):
         iters=cfg.latents.iters,
         infer_iters=cfg.latents.infer_iters,
         min_target_volume=cfg.min_target_volume,
+        obs_model=cfg.latents.obs_model,
+        obs_temperature=cfg.latents.obs_temperature,
+        prob_resolution=cfg.latents.prob_resolution,
+        prob_floor=cfg.latents.prob_floor,
+        calibration_path=cfg.latents.calibration_path,
         seed=cfg.latents.seed,
     )
 

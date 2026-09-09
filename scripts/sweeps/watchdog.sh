@@ -7,8 +7,12 @@
 # Trials already running when the watchdog starts are left alone: they predate
 # the budget, and one of them may be a long run that is still making progress.
 #
+# The default sits above the sweep's own `timeout`, so this only ever fires on
+# a trial that ignored SIGTERM -- otherwise it would be racing the budget and
+# killing healthy trials.
+#
 #   bash watchdog.sh [limit_seconds]
-LIMIT=${1:-6000}
+LIMIT=${1:-15000}
 PATTERN="flows/nn_potential.py"
 
 GRANDFATHERED=" $(pgrep -f "$PATTERN" | tr '\n' ' ')"

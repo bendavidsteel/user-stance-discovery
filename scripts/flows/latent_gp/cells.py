@@ -1,15 +1,68 @@
 """Cell-level stance aggregate: loading, holdout masks and packing.
 
-A cell is one (seed, target, time bin). Labels are {-1, 0, +1}, so the three
-ordinal category counts are determined exactly by (n, s_sum, s2_sum) and the
-aggregate never has to be rebuilt when the likelihood changes.
+A cell is one (seed, target, time bin). The three ordinal category counts are
+determined exactly by (n, s_sum, s2_sum) -- under hard labels as integers, and
+under the classifier's probabilities as expected counts, since the same three
+moments carry either. So switching between them never rebuilds the aggregate.
+
+The mixture likelihood needs more than three counts, and takes it from the
+`q<i>` columns: the count of posts falling on lattice point i of the simplex
+(see probs.py). They are optional, and absent for an aggregate built from
+labels alone.
 """
 
 import datetime
+import re
 
 import numpy as np
 import polars as pl
 import jax.numpy as jnp
+
+from . import _jax  # noqa: F401  -- x64 before the first array
+
+from . import probs as probs_mod
+
+ARCH_RE = re.compile(r'^q(\d+)$')
+
+
+def arch_cols(columns):
+    """Lattice count columns, in lattice-index order."""
+    hits = [(int(m.group(1)), c) for c in columns for m in [ARCH_RE.match(c)] if m]
+    return [c for _, c in sorted(hits)]
+
+
+def stored_resolution(columns):
+    """Resolution the lattice counts were built at, or None if there are none."""
+    n = len(arch_cols(columns))
+    if not n:
+        return None
+    for r in range(1, 33):
+        if probs_mod.n_archetypes(r) == n:
+            return r
+    raise ValueError(f'{n} lattice columns match no simplex resolution')
+
+
+def lattice(df, resolution):
+    """Per-cell lattice counts, coarsening the stored grid if a coarser one is asked.
+
+    Coarsening rounds an already-rounded point, so it does not match binning the
+    raw probabilities at the coarse grid. Good enough to test how much the
+    resolution matters, not for the fit the result is reported from.
+    """
+    cols = arch_cols(df.columns)
+    if not cols:
+        raise ValueError('aggregate carries no lattice counts: rebuild it from '
+                         'the classifier probabilities')
+    stored = stored_resolution(df.columns)
+    counts = df.select(cols).to_numpy().astype(np.float64)
+    if resolution == stored:
+        return counts
+    if resolution > stored:
+        raise ValueError(f'resolution {resolution} is finer than the stored {stored}')
+    tgt = probs_mod.assign(probs_mod.simplex_grid(stored), resolution)
+    acc = np.zeros((probs_mod.n_archetypes(resolution), len(counts)))
+    np.add.at(acc, tgt, counts.T)
+    return acc.T
 
 
 def load(path, bin_factor, seeds=None, min_target_volume=None):
@@ -17,19 +70,27 @@ def load(path, bin_factor, seeds=None, min_target_volume=None):
 
     `seeds` restricts the seed set before indices are assigned, so a subset run
     still produces contiguous indices.
-    """
-    df = pl.read_parquet(path)
-    if seeds is not None:
-        df = df.filter(pl.col('SeedName').is_in(list(seeds)))
-    if min_target_volume:
-        keep = df.group_by('target').agg(pl.col('n').sum().alias('v')) \
-                 .filter(pl.col('v') >= min_target_volume).select('target')
-        df = df.join(keep, on='target', how='inner')
 
-    seed_names = df['SeedName'].unique().sort().to_list()
-    targets = df['target'].unique().sort().to_list()
-    t0 = df['bin'].min()
-    df = df.with_columns([
+    Streamed: read eagerly, the full aggregate costs five times the memory of
+    the frame it returns, and two fits sharing a machine will not fit.
+    """
+    lf = pl.scan_parquet(path)
+    if seeds is not None:
+        lf = lf.filter(pl.col('SeedName').is_in(list(seeds)))
+    if min_target_volume:
+        keep = (lf.group_by('target').agg(pl.col('n').sum().alias('v'))
+                  .filter(pl.col('v') >= min_target_volume).select('target'))
+        lf = lf.join(keep, on='target', how='inner')
+
+    def one(expr):
+        return lf.select(expr).collect(engine='streaming')
+
+    seed_names = one(pl.col('SeedName').unique().sort())['SeedName'].to_list()
+    targets = one(pl.col('target').unique().sort())['target'].to_list()
+    t0 = one(pl.col('bin').min())['bin'][0]
+
+    arch = arch_cols(lf.collect_schema().names())
+    lf = lf.with_columns([
         pl.col('SeedName').replace_strict({s: i for i, s in enumerate(seed_names)}).alias('m'),
         pl.col('target').replace_strict({s: i for i, s in enumerate(targets)}).alias('j'),
         ((pl.col('bin') - pl.lit(t0)).dt.total_days() // (2 * bin_factor))
@@ -37,18 +98,18 @@ def load(path, bin_factor, seeds=None, min_target_volume=None):
     ])
     # group_by does not preserve order, and row order sets the reduction order
     # of the scatters downstream -- sort so repeated runs agree bit for bit
-    df = df.group_by(['m', 'j', 't']).agg(
-        pl.col('n').sum(), pl.col('s_sum').sum(), pl.col('s2_sum').sum()
-    ).sort(['m', 'j', 't'])
-    df = df.with_columns([
+    df = lf.group_by(['m', 'j', 't']).agg(
+        [pl.col('n').sum(), pl.col('s_sum').sum(), pl.col('s2_sum').sum()]
+        + [pl.col(c).sum() for c in arch]
+    ).sort(['m', 'j', 't']).with_columns([
         pl.col('n').cast(pl.Float64),
         ((pl.col('s2_sum') + pl.col('s_sum')) / 2).alias('n_pos'),
         ((pl.col('s2_sum') - pl.col('s_sum')) / 2).alias('n_neg'),
         (pl.col('n').cast(pl.Float64) - pl.col('s2_sum')).alias('n_neu'),
-    ])
+    ]).collect(engine='streaming')
     meta = dict(seeds=seed_names, targets=targets, t0=t0,
                 M=len(seed_names), J=len(targets), T=int(df['t'].max()) + 1,
-                dt=2.0 * bin_factor)
+                dt=2.0 * bin_factor, arch=arch)
     return df, meta
 
 
@@ -118,12 +179,16 @@ def deflate(df, rho):
         (pl.col('n') / (1.0 + (pl.col('n') - 1.0) * rho)).alias('n_eff'))
 
 
-def pack(df, meta):
-    """Arrays for the E/M steps, with per-cell counts scaled to n_eff."""
+def pack(df, meta, n_arch=None):
+    """Arrays for the E/M steps, with per-cell counts scaled to n_eff.
+
+    `n_arch` is the (cells, lattice) count matrix for the soft-evidence
+    likelihood, already aligned to `df`'s rows.
+    """
     n = df['n'].to_numpy().astype(np.float64)
     ne = df['n_eff'].to_numpy().astype(np.float64)
     scale = ne / n
-    return {
+    out = {
         'j': jnp.asarray(df['j'].to_numpy()),
         'flat': jnp.asarray(df['m'].to_numpy() * meta['T'] + df['t'].to_numpy()),
         'n': jnp.asarray(ne),
@@ -134,6 +199,11 @@ def pack(df, meta):
         'n_neu': jnp.asarray(df['n_neu'].to_numpy() * scale),
         'M': meta['M'], 'J': meta['J'], 'T': meta['T'], 'N': float(ne.sum()),
     }
+    if n_arch is not None:
+        # left on the host: the site computation only ever reads a chunk at a
+        # time, and the whole matrix is the largest array in a mixture fit
+        out['n_arch'] = np.asarray(n_arch) * scale[:, None]
+    return out
 
 
 def eval_set(df):
