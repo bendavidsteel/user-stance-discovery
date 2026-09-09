@@ -70,19 +70,27 @@ def load(path, bin_factor, seeds=None, min_target_volume=None):
 
     `seeds` restricts the seed set before indices are assigned, so a subset run
     still produces contiguous indices.
-    """
-    df = pl.read_parquet(path)
-    if seeds is not None:
-        df = df.filter(pl.col('SeedName').is_in(list(seeds)))
-    if min_target_volume:
-        keep = df.group_by('target').agg(pl.col('n').sum().alias('v')) \
-                 .filter(pl.col('v') >= min_target_volume).select('target')
-        df = df.join(keep, on='target', how='inner')
 
-    seed_names = df['SeedName'].unique().sort().to_list()
-    targets = df['target'].unique().sort().to_list()
-    t0 = df['bin'].min()
-    df = df.with_columns([
+    Streamed: read eagerly, the full aggregate costs five times the memory of
+    the frame it returns, and two fits sharing a machine will not fit.
+    """
+    lf = pl.scan_parquet(path)
+    if seeds is not None:
+        lf = lf.filter(pl.col('SeedName').is_in(list(seeds)))
+    if min_target_volume:
+        keep = (lf.group_by('target').agg(pl.col('n').sum().alias('v'))
+                  .filter(pl.col('v') >= min_target_volume).select('target'))
+        lf = lf.join(keep, on='target', how='inner')
+
+    def one(expr):
+        return lf.select(expr).collect(engine='streaming')
+
+    seed_names = one(pl.col('SeedName').unique().sort())['SeedName'].to_list()
+    targets = one(pl.col('target').unique().sort())['target'].to_list()
+    t0 = one(pl.col('bin').min())['bin'][0]
+
+    arch = arch_cols(lf.collect_schema().names())
+    lf = lf.with_columns([
         pl.col('SeedName').replace_strict({s: i for i, s in enumerate(seed_names)}).alias('m'),
         pl.col('target').replace_strict({s: i for i, s in enumerate(targets)}).alias('j'),
         ((pl.col('bin') - pl.lit(t0)).dt.total_days() // (2 * bin_factor))
@@ -90,17 +98,15 @@ def load(path, bin_factor, seeds=None, min_target_volume=None):
     ])
     # group_by does not preserve order, and row order sets the reduction order
     # of the scatters downstream -- sort so repeated runs agree bit for bit
-    arch = arch_cols(df.columns)
-    df = df.group_by(['m', 'j', 't']).agg(
+    df = lf.group_by(['m', 'j', 't']).agg(
         [pl.col('n').sum(), pl.col('s_sum').sum(), pl.col('s2_sum').sum()]
         + [pl.col(c).sum() for c in arch]
-    ).sort(['m', 'j', 't'])
-    df = df.with_columns([
+    ).sort(['m', 'j', 't']).with_columns([
         pl.col('n').cast(pl.Float64),
         ((pl.col('s2_sum') + pl.col('s_sum')) / 2).alias('n_pos'),
         ((pl.col('s2_sum') - pl.col('s_sum')) / 2).alias('n_neg'),
         (pl.col('n').cast(pl.Float64) - pl.col('s2_sum')).alias('n_neu'),
-    ])
+    ]).collect(engine='streaming')
     meta = dict(seeds=seed_names, targets=targets, t0=t0,
                 M=len(seed_names), J=len(targets), T=int(df['t'].max()) + 1,
                 dt=2.0 * bin_factor, arch=arch)
