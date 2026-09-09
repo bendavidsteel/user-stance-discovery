@@ -50,6 +50,13 @@ def component(kind, dt, tau=None, var=1.0, p0=None):
         P0 = np.diag([var if p0 is None else p0, var / tau ** 2])
         return F, Q, P0
 
+    if kind == 'ou':                             # mean-reverting, but rough
+        # tau is scaled so the short-lag increment variance matches wiener's at
+        # the same tau, which makes the pair a test of confinement alone
+        F = np.array([[np.exp(-dt / (2.0 * tau))]])
+        P0 = np.array([[var]])
+        return F, Q_stationary(F, P0), P0
+
     if kind == 'matern32':                       # stationary, mean-reverting
         lam = np.sqrt(3.0) / tau
         e = np.exp(-lam * dt)
