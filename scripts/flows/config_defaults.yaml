@@ -26,7 +26,8 @@ latents:
   interp_days: 2.0               # resample onto this spacing; 0 keeps the bin grid
   n_fast: 2                      # dimensions with drifting dynamics; the rest are slow
   fast_tau: 80.0
-  slow_kind: const               # const (frozen) or wiener
+  fast_kind: wiener              # wiener (diffusing) or ou (confined)
+  slow_kind: const               # const (frozen), wiener or ou
   slow_tau: 2560.0
   rho: 0.0                       # within-cell overdispersion; 0 = iid per post
   iters: 25

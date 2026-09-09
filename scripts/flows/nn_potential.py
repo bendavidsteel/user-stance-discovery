@@ -193,6 +193,7 @@ def latent_config(cfg):
         n_dims=cfg.n_dims,
         n_fast=cfg.latents.n_fast,
         fast_tau=cfg.latents.fast_tau,
+        fast_kind=cfg.latents.fast_kind,
         slow_kind=cfg.latents.slow_kind,
         slow_tau=cfg.latents.slow_tau,
         bin_factor=cfg.latents.bin_factor,

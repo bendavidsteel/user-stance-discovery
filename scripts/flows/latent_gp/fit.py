@@ -23,15 +23,19 @@ import jax.numpy as jnp
 from . import core, metrics, ordinal
 
 
-def prior_components(K, n_fast, fast_tau, slow_kind='const', slow_tau=2560.0, var=1.0):
+def prior_components(K, n_fast, fast_tau, slow_kind='const', slow_tau=2560.0, var=1.0,
+                     fast_kind='wiener'):
     """Per-dimension prior: n_fast drifting dimensions, the rest slow or frozen.
 
     Homogeneous mixes are returned in the shared form, which leaves the latent
     basis free to rotate; a genuine mix is per-dimension and so fixes the basis.
+
+    A drifting dimension is a Wiener or an OU: both are rough, and they differ
+    in whether the level is confined.
     """
-    fast = dict(kind='wiener', tau=float(fast_tau), var=var)
+    fast = dict(kind=fast_kind, tau=float(fast_tau), var=var)
     slow = (dict(kind='const', var=var) if slow_kind == 'const'
-            else dict(kind='wiener', tau=float(slow_tau), var=var))
+            else dict(kind=slow_kind, tau=float(slow_tau), var=var))
     if n_fast <= 0:
         return [slow]
     if n_fast >= K:

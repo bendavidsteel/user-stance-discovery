@@ -42,6 +42,7 @@ class LatentConfig:
     n_dims: int = 6
     n_fast: int = 2
     fast_tau: float = 80.0
+    fast_kind: str = 'wiener'       # wiener (diffusing) or ou (confined)
     slow_kind: str = 'const'
     slow_tau: float = 2560.0
     bin_factor: int = 8
@@ -75,7 +76,8 @@ class LatentConfig:
         varying a probability setting still hits the cache on the trials that
         ignore it, instead of refitting the same latents under a new key.
         """
-        skip = {'cells_path'} | _unused_by(self.obs_model)
+        skip = ({'cells_path'} | _unused_by(self.obs_model)
+                | _unused_by_mix(self.n_fast, self.n_dims))
         body = '|'.join(f'{f.name}={getattr(self, f.name)}'
                         for f in dataclasses.fields(self) if f.name not in skip)
         return hashlib.blake2b(body.encode(), digest_size=6).hexdigest()
@@ -86,12 +88,29 @@ _PROB_FIELDS = frozenset({'obs_temperature', 'prob_resolution', 'prob_floor'})
 _CHANNEL_FIELDS = frozenset({'calibration_path'})
 
 
+_FAST_FIELDS = frozenset({'fast_kind', 'fast_tau'})
+_SLOW_FIELDS = frozenset({'slow_kind', 'slow_tau'})
+
+
 def _unused_by(obs_model):
     if obs_model == 'hard':
         return _PROB_FIELDS | _CHANNEL_FIELDS
     if obs_model == 'channel':
         return _PROB_FIELDS
     return _CHANNEL_FIELDS
+
+
+def _unused_by_mix(n_fast, n_dims):
+    """A homogeneous mix reads only one half of the timescale settings.
+
+    Without this every value of the unread half keys its own cache entry, and
+    at full scale a latent fit is 12-20 minutes.
+    """
+    if n_fast >= n_dims:
+        return _SLOW_FIELDS
+    if n_fast <= 0:
+        return _FAST_FIELDS
+    return frozenset()
 
 
 def observation(df, train_mask, obs_model, temperature=1.0, resolution=6,
@@ -187,7 +206,8 @@ def build_latents(lcfg, spec, seed_split, cache_dir=None, log=print):
         f"train seeds {int(is_train.sum())} cutoff {cutoff:%Y-%m-%d} (bin {t_cut})")
 
     comps = fit_mod.prior_components(K, lcfg.n_fast, lcfg.fast_tau,
-                                     lcfg.slow_kind, lcfg.slow_tau)
+                                     lcfg.slow_kind, lcfg.slow_tau,
+                                     fast_kind=lcfg.fast_kind)
 
     m_arr = df['m'].to_numpy()
     t_arr = df['t'].to_numpy()
