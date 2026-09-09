@@ -40,12 +40,22 @@ def prior_components(K, n_fast, fast_tau, slow_kind='const', slow_tau=2560.0, va
 
 
 def _marginal_f(d, W, b, Ez, Ezz, K):
+    """Mean and variance of f per cell.
+
+    The quadratic form is accumulated a term at a time. Gathering the whole
+    (cells, K, K) posterior covariance is the largest array in the fit -- on
+    the finest grid several times the size of everything else -- and it is only
+    ever contracted down to one number per cell.
+    """
     Wj = W[d['j']]
-    ez = Ez.reshape(-1, K)[d['flat']]
-    cov = Ezz.reshape(-1, K, K)[d['flat']]
-    m = (Wj * ez).sum(-1) + b[d['j']]
-    v = jnp.maximum(jnp.einsum('ci,cij,cj->c', Wj, cov, Wj), 1e-10)
-    return m, v
+    ez = Ez.reshape(-1, K)
+    zz = Ezz.reshape(-1, K, K)
+    m = (Wj * ez[d['flat']]).sum(-1) + b[d['j']]
+    v = jnp.zeros(d['flat'].shape[0])
+    for i in range(K):
+        for j in range(K):
+            v = v + Wj[:, i] * zz[d['flat'], i, j] * Wj[:, j]
+    return m, jnp.maximum(v, 1e-10)
 
 
 def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0, logL=None):
@@ -127,7 +137,11 @@ def predict(r, ev):
     W, b, Ez, Ezz = r['W'], r['b'], r['Ez'], r['Ezz']
     Wj = W[ev['j']]
     m = (Wj * Ez[ev['m'], ev['t']]).sum(-1) + b[ev['j']]
-    v = np.maximum(np.einsum('ci,cij,cj->c', Wj, Ezz[ev['m'], ev['t']], Wj), 1e-10)
+    v = np.zeros(len(Wj))
+    for i in range(Wj.shape[1]):        # as in _marginal_f, to bound the gather
+        for j in range(Wj.shape[1]):
+            v += Wj[:, i] * Ezz[ev['m'], ev['t'], i, j] * Wj[:, j]
+    v = np.maximum(v, 1e-10)
     return tuple(np.asarray(x) for x in ordinal.predictive_chunked(
         jnp.asarray(m), jnp.asarray(v), r['c']))
 
