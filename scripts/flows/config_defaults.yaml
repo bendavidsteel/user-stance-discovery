@@ -20,19 +20,31 @@ split:
 # reads coords precomputed over everything and cannot make that guarantee.
 latents:
   method: gpfa
-  cells_path: 'tmp/gpfa_all_cells.parquet.zstd'
+  cells_path: 'tmp/gpfa_cells_2022_onwards.parquet.zstd'
   cache_dir: 'tmp/latents'
   bin_factor: 8                  # latent grid spacing = 2 * bin_factor days
   interp_days: 2.0               # resample onto this spacing; 0 keeps the bin grid
   n_fast: 2                      # dimensions with drifting dynamics; the rest are slow
   fast_tau: 80.0
-  slow_kind: const               # const (frozen) or wiener
+  fast_kind: wiener              # wiener (diffusing) or ou (confined)
+  slow_kind: const               # const (frozen), wiener or ou
   slow_tau: 2560.0
   rho: 0.0                       # within-cell overdispersion; 0 = iid per post
   iters: 25
   infer_iters: 15
   causal_state: false            # true = filtered state, which cannot see its own future
   seed: 0
+
+  # How much of the stance classifier's output the fit sees. 'hard' is its
+  # label; 'soft' its probabilities as expected counts; 'mixture' its
+  # probabilities as soft evidence, so an ambiguous post carries no weight
+  # rather than counting toward the middle category; 'channel' its label
+  # through a confusion matrix measured on coded pairs.
+  obs_model: hard                # hard | channel | soft | mixture
+  obs_temperature: 1.0           # >1 flattens an overconfident posterior
+  prob_resolution: 6             # simplex lattice spacing is 1/resolution
+  prob_floor: 0.01               # uniform mass mixed into each lattice point
+  calibration_path: ''           # latent_gp.calibrate output; 'channel' needs it
 
 # Skill, not MSE: a smoother latent lowers model and baseline error together,
 # so optimising MSE would select for smoothing the latent into a constant.

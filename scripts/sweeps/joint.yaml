@@ -3,13 +3,15 @@
 # Both are fitted in one process, so the representation is re-fitted inside the
 # split boundary for every trial and held-out trajectories never reach it.
 #
-# The objective is skill_ceiling = rho^2 on val_out (unseen trajectory, unseen
-# time), where rho is the correlation between predicted and observed
-# displacement. MSE is out because a smoother latent lowers model and baseline
+# The objective is ceiling_gain on val_out (unseen trajectory, unseen time):
+# the share of observed displacement variance the landscape explains beyond a
+# momentum rule. MSE is out because a smoother latent lowers model and baseline
 # error together, so it would drive the latent toward a constant and reward
-# itself for it. Plain skill is out because it vanishes as the drift does: the
-# landscape model collapses to the identity within one epoch, and skill cannot
-# tell that apart from a model that simply does not help.
+# itself for it. Plain skill is out because it vanishes as the drift does, and
+# cannot tell a collapsed configuration from a merely unhelpful one.
+# skill_ceiling = rho^2 is out because the momentum one-liner reaches
+# |rho| ~ 0.25 on these latents unaided, so a model can score well on it by
+# rediscovering momentum.
 #
 # GPFA parameters are discrete so that trials sharing a latent configuration
 # hit the on-disk cache and only pay for landscape training.
@@ -38,10 +40,14 @@ metric:
 command:
   - ${env}
   - timeout                     # a stalled trial must not block its agent
-  # 100 epochs at ~76s, plus the latent fit and six scenario cells, is about
-  # 8600s. A budget under that kills healthy trials rather than stalled ones,
-  # which is what cost the previous sweep two thirds of its yield.
-  - "10800"
+  # The rebuilt aggregate has half again as many pairs, so an epoch now runs
+  # ~70s at batch_size 512 and about twice that at 256, and the latent fit
+  # costs 12-20 min depending on the grid. A hundred epochs at the small batch
+  # size therefore lands past 10800s, and a budget under the trial kills
+  # healthy trials rather than stalled ones -- which is what cost the first
+  # sweep two thirds of its yield. patience keeps the typical trial far inside
+  # this, so the slack is only ever paid by the trials that need it.
+  - "14400"
   - python
   - ${program}
   - ${args_no_hyphens}
@@ -64,19 +70,72 @@ parameters:
     value: "null"
 
 
+  # --- stance observation model ---
+  # How much of the classifier's output the latent fit sees. On the GPFA's own
+  # held-out blocks, a drifting prior beats a frozen latent only under
+  # 'mixture'; under 'hard' and 'soft' the frozen latent wins, so the drift the
+  # landscape model exists to predict may not be identifiable from labels at
+  # all. Swept here so the held-out objective decides, but note a bayes sweep
+  # cannot give clean marginals: settle it with a paired rerun of the winning
+  # configuration under each value, everything else fixed.
+  #
+  # 'channel' reads the finetune's own 16,972-example test confusion matrix,
+  # written beside the checkpoint; latent_gp.calibrate turns it into the file
+  # below. It needs three lattice points rather than 28, so it is much the
+  # cheapest of the three that model classifier error.
+  latents.obs_model:
+    values: [hard, channel, soft, mixture]
+  latents.calibration_path:
+    value: tmp/stance_calibration.json
+  # Temperature is only read by soft and mixture, and the cache key knows that,
+  # so hard and channel trials still share a latent fit across its values.
+  #
+  # A calibrated classifier's mean confidence equals its accuracy. On the corpus
+  # the mean is 0.776 against the test split's 0.740 accuracy, so the classifier
+  # is overconfident and only T > 1 is in play; matching the two implies T=1.33,
+  # and the per-benchmark accuracy spread (0.66 to 0.85) brackets it to 1.8ish
+  # before the hardest benchmark takes over.
+  #
+  # Discrete, like the other GPFA parameters and for the same reason: drawn from
+  # a continuous range every soft or mixture trial is its own cache key and pays
+  # for a full latent fit, and at this scale that is most of the trial budget.
+  latents.obs_temperature:
+    values: [1.0, 1.33, 1.8]
+
   # --- latent-GP factor model ---
   # The first sweep put its two best trials at fast_tau=40 and bin_factor=4,
   # both the smallest value offered, so the ranges extend downward rather than
   # narrowing around them. n_fast=0 froze the latent and took rho to 0.03, so
   # at least one drifting dimension is required.
+  #
+  # fast_kind decides whether a drifting dimension is confined. Both kinds are
+  # rough and their tau means the same thing, so the pair isolates confinement.
+  # On the GPFA's own held-out blocks a homogeneous OU at tau=80 took the best
+  # forecast RPS and log score of nine priors tried, beating the Wiener at every
+  # matched tau, so it is on the menu here rather than assumed.
+  #
+  # n_fast=6 is >= every n_dims offered, which is how a homogeneous mix is
+  # reached: the winning prior was homogeneous, and a per-dimension mix cannot
+  # express it.
   n_dims:
     values: [3, 4, 5, 6]
   latents.n_fast:
-    values: [1, 2, 3]
+    values: [1, 2, 3, 6]
+  latents.fast_kind:
+    values: [wiener, ou]
   latents.fast_tau:
     values: [10.0, 20.0, 40.0, 80.0]
+  # Confining the slow dimensions turned out to matter more than whether they
+  # drift at all: holding a 1fast+5slow mix fixed and changing only the slow
+  # kind, const -> wiener -> ou took forecast RPS 0.2830 -> 0.2822 -> 0.2734.
+  #
+  # slow_tau has to come with it. An OU reverts over 2*tau, so at 2560 alone it
+  # would not revert once inside the span of the data and the option would be a
+  # null test; 640 is where the gain above was measured.
   latents.slow_kind:
-    values: [const, wiener]
+    values: [const, wiener, ou]
+  latents.slow_tau:
+    values: [640.0, 2560.0]
   latents.bin_factor:
     values: [2, 4, 8]
 

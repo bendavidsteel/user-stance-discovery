@@ -20,7 +20,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-jax.config.update('jax_enable_x64', True)   # float32 is not survivable here
+from . import _jax  # noqa: F401  -- enables x64 before any array is created
 
 JITTER = 1e-12
 SMOOTH_JITTER = 1e-10
@@ -49,6 +49,13 @@ def component(kind, dt, tau=None, var=1.0, p0=None):
         Q = q * np.array([[dt ** 3 / 3, dt ** 2 / 2], [dt ** 2 / 2, dt]])
         P0 = np.diag([var if p0 is None else p0, var / tau ** 2])
         return F, Q, P0
+
+    if kind == 'ou':                             # mean-reverting, but rough
+        # tau is scaled so the short-lag increment variance matches wiener's at
+        # the same tau, which makes the pair a test of confinement alone
+        F = np.array([[np.exp(-dt / (2.0 * tau))]])
+        P0 = np.array([[var]])
+        return F, Q_stationary(F, P0), P0
 
     if kind == 'matern32':                       # stationary, mean-reverting
         lam = np.sqrt(3.0) / tau
@@ -168,14 +175,21 @@ def assemble(d, W, prec, resid, K):
 
     prec is the cell's precision on f, resid its precision-weighted target
     offset; the Gaussian and ordinal likelihoods differ only in these two.
+
+    Scattered one entry of the K x K block at a time. Scattering the whole
+    block at once needs a (cells, K, K) intermediate, which on the finest grid
+    is several times the size of the result and does not fit on the card.
     """
     Wj = W[d['j']]
-    gv = resid[:, None] * Wj
-    Gv = prec[:, None, None] * (Wj[:, :, None] * Wj[:, None, :])
     MT = d['M'] * d['T']
-    g = jnp.zeros((MT, K)).at[d['flat']].add(gv).reshape(d['M'], d['T'], K)
-    G = jnp.zeros((MT, K, K)).at[d['flat']].add(Gv).reshape(d['M'], d['T'], K, K)
-    return G, g
+    g = jnp.zeros((MT, K)).at[d['flat']].add(resid[:, None] * Wj)
+    ent = {}
+    for a in range(K):
+        for b in range(a, K):
+            ent[a, b] = jnp.zeros(MT).at[d['flat']].add(prec * Wj[:, a] * Wj[:, b])
+    G = jnp.stack([jnp.stack([ent[min(a, b), max(a, b)] for b in range(K)], -1)
+                   for a in range(K)], -2)
+    return G.reshape(d['M'], d['T'], K, K), g.reshape(d['M'], d['T'], K)
 
 
 # ------------------------------------------------------------------ M-step
@@ -195,7 +209,13 @@ def m_step(d, Ez, Ezz, prec, target, K, ridge=1e-4):
     Euu = Euu.at[:, K, :K].set(Eu[:, :K])
     Euu = Euu.at[:, K, K].set(1.0)
 
-    A = jnp.zeros((d['J'], K + 1, K + 1)).at[d['j']].add(prec[:, None, None] * Euu[d['flat']])
+    # entry at a time, for the reason given in assemble
+    ent = {}
+    for a in range(K + 1):
+        for b in range(a, K + 1):
+            ent[a, b] = jnp.zeros(d['J']).at[d['j']].add(prec * Euu[d['flat'], a, b])
+    A = jnp.stack([jnp.stack([ent[min(a, b), max(a, b)] for b in range(K + 1)], -1)
+                   for a in range(K + 1)], -2)
     c = jnp.zeros((d['J'], K + 1)).at[d['j']].add((prec * target)[:, None] * Eu[d['flat']])
     Wb = jnp.linalg.solve(A + ridge * jnp.eye(K + 1), c[..., None])[..., 0]
     return Wb[:, :K], Wb[:, K]
