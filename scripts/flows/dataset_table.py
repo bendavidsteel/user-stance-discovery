@@ -1,26 +1,37 @@
 import os
+import re
 
 import polars as pl
 
 def main():
-    seed_data_path = './data/stance_targets/noun_phrase_bkrr_trends'
-    platform_data_path = './data/stance_targets/platform_handle_noun_phrase_bkrr_trends'
+    stance_data_path = './data/stance_targets/2022-01-01-onwards_noun_phrase_stance'
     output_path = './out/dataset_table.tex'
 
-    seed_df = pl.read_parquet(os.path.join(seed_data_path, 'loaded_trends.parquet.zstd'), columns=['filter_value', 'volume'])
-    platform_df = pl.read_parquet(os.path.join(platform_data_path, 'loaded_trends.parquet.zstd'), columns=['filter_value', 'volume'])
+    file_paths = [
+        os.path.join(stance_data_path, file)
+        for file in os.listdir(stance_data_path)
+        if re.search(r'\d{4}_\d{1,2}_doc_targets_with_stance.parquet.zstd', file)
+    ]
 
-    total_num_posts = seed_df['volume'].sum()
-    total_num_users = seed_df['filter_value'].n_unique()
+    if not file_paths:
+        raise ValueError("No stance data files found in the data directory")
 
-    platforms = platform_df['filter_value'].unique().str.split('-').list.get(1).unique().sort()
+    df = pl.read_parquet(file_paths, columns=['id', 'platform', 'seed'])
+    df = df.unique(['id', 'platform'])
+    df = df.with_columns(pl.col('seed').struct.field('SeedName'))
 
-    rows = []
-    for platform in platforms:
-        platform_seed_df = platform_df.filter(pl.col('filter_value').str.contains(f'-{platform}-'))
-        platform_num_posts = platform_seed_df['volume'].sum()
-        platform_num_users = platform_seed_df['filter_value'].n_unique()
-        rows.append((platform.capitalize(), platform_num_posts, platform_num_users))
+    total_num_posts = len(df)
+    total_num_users = df['SeedName'].n_unique()
+
+    platform_counts = df.group_by('platform').agg(
+        pl.len().alias('num_posts'),
+        pl.col('SeedName').n_unique().alias('num_users'),
+    ).sort('platform')
+
+    rows = [
+        (platform.capitalize(), num_posts, num_users)
+        for platform, num_posts, num_users in platform_counts.iter_rows()
+    ]
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
