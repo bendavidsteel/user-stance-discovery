@@ -194,7 +194,9 @@ def pack(df, meta, n_arch=None):
         'M': meta['M'], 'J': meta['J'], 'T': meta['T'], 'N': float(ne.sum()),
     }
     if n_arch is not None:
-        out['n_arch'] = jnp.asarray(np.asarray(n_arch) * scale[:, None])
+        # left on the host: the site computation only ever reads a chunk at a
+        # time, and the whole matrix is the largest array in a mixture fit
+        out['n_arch'] = np.asarray(n_arch) * scale[:, None]
     return out
 
 

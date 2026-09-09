@@ -221,7 +221,7 @@ class Mixture:
     """Lattice-count observation using the per-post probabilities in full."""
 
     def __init__(self, d, logL):
-        self.n_arch = jnp.asarray(d['n_arch'])
+        self.n_arch = np.asarray(d['n_arch'])
         self.logL = jnp.asarray(logL)
         self.counts = (d['n_neg'], d['n_neu'], d['n_pos'])
         self.chunk = mixture_chunk(self.logL.shape[0])
@@ -232,7 +232,7 @@ class Mixture:
         return init_threshold(*self.counts)
 
     def sites(self, m, v, c):
-        outs = [mixture_sites(m[s], v[s], c, self.n_arch[s], self.logL)
+        outs = [mixture_sites(m[s], v[s], c, jnp.asarray(self.n_arch[s]), self.logL)
                 for s in self._slices(m.shape[0])]
         return (jnp.concatenate([o[0] for o in outs]),
                 jnp.concatenate([o[1] for o in outs]))
@@ -240,7 +240,8 @@ class Mixture:
     def threshold_step(self, m, v, c):
         g = h = 0.0
         for s in self._slices(m.shape[0]):
-            gi, hi = _mixture_threshold_derivs(m[s], v[s], c, self.n_arch[s], self.logL)
+            gi, hi = _mixture_threshold_derivs(m[s], v[s], c,
+                                               jnp.asarray(self.n_arch[s]), self.logL)
             g += float(gi); h += float(hi)
         step = -g / h if h < -1e-12 else 0.0
         return float(np.clip(c + np.clip(step, -0.25, 0.25), 0.05, 5.0))
