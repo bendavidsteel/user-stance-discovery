@@ -132,13 +132,15 @@ def main():
             cfgs.append((f'Matern-3/2  tau={tau:.0f}', [dict(kind='matern32', tau=tau)]))
             cfgs.append((f'const+Matern tau={tau:.0f}',
                          [dict(kind='const', var=1.0), dict(kind='matern32', tau=tau)]))
-        for tau in (80., 160., 320., 1280.):
-            cfgs.append((f'OU          tau={tau:.0f}', [dict(kind='ou', tau=tau)]))
         taus = (10., 20., 40., 80., 160., 320., 1280., 5120.)
     else:
         taus = tuple(float(x) for x in args.taus.split(','))
+    # OU is scanned wherever the Wiener is and at the same tau: its tau is scaled
+    # to match the Wiener's short-lag increments, so only the matched pair
+    # separates reverting from diffusing
     for tau in taus:
         cfgs.append((f'Wiener      tau={tau:.0f}', [dict(kind='wiener', tau=tau)]))
+        cfgs.append((f'OU          tau={tau:.0f}', [dict(kind='ou', tau=tau)]))
     if cfgs_out is not None:
         cfgs = cfgs_out
 
