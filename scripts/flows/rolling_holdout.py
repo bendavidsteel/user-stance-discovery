@@ -79,13 +79,18 @@ def one_configuration(df, latent_tag=None):
         if len(df) == 0:
             raise SystemExit(f'no runs with latent_tag {latent_tag}')
         return df
-    tags = df['latent_tag'].unique().sort().to_list()
+    tags = df['latent_tag'].unique().to_list()
     if len(tags) > 1:
-        counts = df.group_by('latent_tag').agg(
+        cols = [c for c in ('n_dims', 'n_fast', 'fast_tau', 'fast_kind', 'slow_kind')
+                if c in df.columns]
+        summary = df.group_by('latent_tag').agg(
+            *[pl.col(c).unique().sort().alias(c) for c in cols],
             pl.col('origin_offset_days').unique().sort().alias('offsets'))
-        raise SystemExit(
-            f'{len(tags)} latent configurations match:\n{counts}\n'
-            'pass --latent-tag to pick one')
+        with pl.Config(tbl_cols=-1, fmt_str_lengths=60):
+            raise SystemExit(f'{len(tags)} latent configurations match:\n'
+                             f'{summary.sort("latent_tag")}\n'
+                             'pass --latent-tag to pick one '
+                             "(runs predating the column show as '')")
     return df
 
 
