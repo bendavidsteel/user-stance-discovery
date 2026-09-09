@@ -77,7 +77,7 @@ class LatentConfig:
         ignore it, instead of refitting the same latents under a new key.
         """
         skip = ({'cells_path'} | _unused_by(self.obs_model)
-                | _unused_by_mix(self.n_fast, self.n_dims))
+                | _unused_by_mix(self.n_fast, self.n_dims, self.slow_kind))
         body = '|'.join(f'{f.name}={getattr(self, f.name)}'
                         for f in dataclasses.fields(self) if f.name not in skip)
         return hashlib.blake2b(body.encode(), digest_size=6).hexdigest()
@@ -100,17 +100,20 @@ def _unused_by(obs_model):
     return _CHANNEL_FIELDS
 
 
-def _unused_by_mix(n_fast, n_dims):
-    """A homogeneous mix reads only one half of the timescale settings.
+def _unused_by_mix(n_fast, n_dims, slow_kind):
+    """Timescale settings the chosen mix never reads.
 
-    Without this every value of the unread half keys its own cache entry, and
+    Without this every value of an unread setting keys its own cache entry, and
     at full scale a latent fit is 12-20 minutes.
     """
+    unused = set()
     if n_fast >= n_dims:
-        return _SLOW_FIELDS
-    if n_fast <= 0:
-        return _FAST_FIELDS
-    return frozenset()
+        unused |= _SLOW_FIELDS
+    elif n_fast <= 0:
+        unused |= _FAST_FIELDS
+    if slow_kind == 'const':
+        unused.add('slow_tau')          # a frozen dimension has no timescale
+    return frozenset(unused)
 
 
 def observation(df, train_mask, obs_model, temperature=1.0, resolution=6,

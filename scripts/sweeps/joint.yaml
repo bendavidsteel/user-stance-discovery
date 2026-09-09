@@ -107,14 +107,35 @@ parameters:
   # both the smallest value offered, so the ranges extend downward rather than
   # narrowing around them. n_fast=0 froze the latent and took rho to 0.03, so
   # at least one drifting dimension is required.
+  #
+  # fast_kind decides whether a drifting dimension is confined. Both kinds are
+  # rough and their tau means the same thing, so the pair isolates confinement.
+  # On the GPFA's own held-out blocks a homogeneous OU at tau=80 took the best
+  # forecast RPS and log score of nine priors tried, beating the Wiener at every
+  # matched tau, so it is on the menu here rather than assumed.
+  #
+  # n_fast=6 is >= every n_dims offered, which is how a homogeneous mix is
+  # reached: the winning prior was homogeneous, and a per-dimension mix cannot
+  # express it.
   n_dims:
     values: [3, 4, 5, 6]
   latents.n_fast:
-    values: [1, 2, 3]
+    values: [1, 2, 3, 6]
+  latents.fast_kind:
+    values: [wiener, ou]
   latents.fast_tau:
     values: [10.0, 20.0, 40.0, 80.0]
+  # Confining the slow dimensions turned out to matter more than whether they
+  # drift at all: holding a 1fast+5slow mix fixed and changing only the slow
+  # kind, const -> wiener -> ou took forecast RPS 0.2830 -> 0.2822 -> 0.2734.
+  #
+  # slow_tau has to come with it. An OU reverts over 2*tau, so at 2560 alone it
+  # would not revert once inside the span of the data and the option would be a
+  # null test; 640 is where the gain above was measured.
   latents.slow_kind:
-    values: [const, wiener]
+    values: [const, wiener, ou]
+  latents.slow_tau:
+    values: [640.0, 2560.0]
   latents.bin_factor:
     values: [2, 4, 8]
 
