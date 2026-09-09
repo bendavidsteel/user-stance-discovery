@@ -12,7 +12,7 @@
 # killing healthy trials.
 #
 #   bash watchdog.sh [limit_seconds]
-LIMIT=${1:-11400}
+LIMIT=${1:-15000}
 PATTERN="flows/nn_potential.py"
 
 GRANDFATHERED=" $(pgrep -f "$PATTERN" | tr '\n' ' ')"

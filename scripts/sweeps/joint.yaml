@@ -40,10 +40,14 @@ metric:
 command:
   - ${env}
   - timeout                     # a stalled trial must not block its agent
-  # 100 epochs at ~76s, plus the latent fit and six scenario cells, is about
-  # 8600s. A budget under that kills healthy trials rather than stalled ones,
-  # which is what cost the previous sweep two thirds of its yield.
-  - "10800"
+  # The rebuilt aggregate has half again as many pairs, so an epoch now runs
+  # ~70s at batch_size 512 and about twice that at 256, and the latent fit
+  # costs 12-20 min depending on the grid. A hundred epochs at the small batch
+  # size therefore lands past 10800s, and a budget under the trial kills
+  # healthy trials rather than stalled ones -- which is what cost the first
+  # sweep two thirds of its yield. patience keeps the typical trial far inside
+  # this, so the slack is only ever paid by the trials that need it.
+  - "14400"
   - python
   - ${program}
   - ${args_no_hyphens}

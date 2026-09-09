@@ -100,14 +100,21 @@ def main():
     elif args.mixed:
         fast = dict(kind='wiener', tau=args.fast_tau)
         slow = dict(kind='wiener', tau=args.slow_tau)
+        # a confined slow dimension rather than a diffusing one: summing Wiener
+        # components is degenerate, but giving dimensions different dynamics is
+        # not, and the slow ones are where the two priors actually differ
+        conf = dict(kind='ou', tau=args.slow_tau)
         cfgs = [('frozen z (all const)', [const]),
                 (f'all fast tau={args.fast_tau:.0f}', [fast]),
-                (f'all slow tau={args.slow_tau:.0f}', [slow])]
+                (f'all slow tau={args.slow_tau:.0f}', [slow]),
+                (f'all OU tau={args.slow_tau:.0f}', [conf])]
         for nf in range(1, K):
             cfgs.append((f'mix {nf}fast+{K - nf}const',
                          [[fast]] * nf + [[const]] * (K - nf)))
             cfgs.append((f'mix {nf}fast+{K - nf}slow',
                          [[fast]] * nf + [[slow]] * (K - nf)))
+            cfgs.append((f'mix {nf}fast+{K - nf}OU',
+                         [[fast]] * nf + [[conf]] * (K - nf)))
         cfgs_out = cfgs
     else:
         cfgs_out = None
@@ -119,6 +126,8 @@ def main():
             cfgs.append((f'Matern-3/2  tau={tau:.0f}', [dict(kind='matern32', tau=tau)]))
             cfgs.append((f'const+Matern tau={tau:.0f}',
                          [dict(kind='const', var=1.0), dict(kind='matern32', tau=tau)]))
+        for tau in (80., 160., 320., 1280.):
+            cfgs.append((f'OU          tau={tau:.0f}', [dict(kind='ou', tau=tau)]))
         taus = (10., 20., 40., 80., 160., 320., 1280., 5120.)
     else:
         taus = tuple(float(x) for x in args.taus.split(','))
