@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from . import core as gpfa
+from . import fit
 
 DT = 16.0
 
@@ -114,3 +115,34 @@ def test_ou_is_rougher_than_matern_at_one_tau():
 
     assert (first_increment([dict(kind='ou', tau=640., var=1.0)])
             > first_increment([dict(kind='matern32', tau=640., var=1.0)]))
+
+
+# ------------------------------------------------------- prior_components
+
+def test_homogeneous_mix_is_shared_across_dimensions():
+    """n_fast >= K is how the sweep reaches a homogeneous prior."""
+    comps = fit.prior_components(K=6, n_fast=6, fast_tau=80., fast_kind='ou')
+    assert comps == [dict(kind='ou', tau=80.0, var=1.0)]
+    assert not gpfa.is_heterogeneous(comps)
+
+
+def test_a_real_mix_is_per_dimension_and_fixes_the_basis():
+    comps = fit.prior_components(K=3, n_fast=1, fast_tau=80., fast_kind='ou',
+                                 slow_kind='const')
+    assert len(comps) == 3 and comps[0][0]['kind'] == 'ou'
+    assert comps[1][0]['kind'] == 'const'
+    assert gpfa.is_heterogeneous(comps)
+
+
+def test_both_kinds_reach_the_drifting_dimensions():
+    for kind in ('wiener', 'ou'):
+        comps = fit.prior_components(K=3, n_fast=2, fast_tau=40., fast_kind=kind,
+                                     slow_kind='wiener', slow_tau=2560.)
+        assert comps[0][0] == dict(kind=kind, tau=40.0, var=1.0)
+        assert comps[2][0] == dict(kind='wiener', tau=2560.0, var=1.0)
+
+
+def test_slow_kind_takes_an_ou():
+    comps = fit.prior_components(K=3, n_fast=1, fast_tau=80., slow_kind='ou',
+                                 slow_tau=640.)
+    assert comps[1][0] == dict(kind='ou', tau=640.0, var=1.0)
