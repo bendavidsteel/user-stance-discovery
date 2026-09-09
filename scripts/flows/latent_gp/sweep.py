@@ -47,6 +47,8 @@ def main():
                     help='sweep per-dimension fast/slow timescale mixes')
     ap.add_argument('--fast-tau', type=float, default=80.)
     ap.add_argument('--slow-tau', type=float, default=2560.)
+    ap.add_argument('--ou-tau', type=float, default=640.,
+                    help='timescale of the confined component in --mixed')
     ap.add_argument('--taus', default=None,
                     help='comma-separated Wiener timescales; skips the Matern configs')
     ap.add_argument('--obs-model', default='hard', choices=latents.OBS_MODELS)
@@ -102,12 +104,16 @@ def main():
         slow = dict(kind='wiener', tau=args.slow_tau)
         # a confined slow dimension rather than a diffusing one: summing Wiener
         # components is degenerate, but giving dimensions different dynamics is
-        # not, and the slow ones are where the two priors actually differ
-        conf = dict(kind='ou', tau=args.slow_tau)
+        # not, and the slow ones are where the two priors actually differ.
+        #
+        # Not at slow_tau: an OU reverts over 2*tau, so at 2560 it would not
+        # revert once inside the span of the data and the comparison against a
+        # slow Wiener would be a null test.
+        conf = dict(kind='ou', tau=args.ou_tau)
         cfgs = [('frozen z (all const)', [const]),
                 (f'all fast tau={args.fast_tau:.0f}', [fast]),
                 (f'all slow tau={args.slow_tau:.0f}', [slow]),
-                (f'all OU tau={args.slow_tau:.0f}', [conf])]
+                (f'all OU tau={args.ou_tau:.0f}', [conf])]
         for nf in range(1, K):
             cfgs.append((f'mix {nf}fast+{K - nf}const',
                          [[fast]] * nf + [[const]] * (K - nf)))
