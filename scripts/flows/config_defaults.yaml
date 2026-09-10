@@ -73,3 +73,9 @@ eval_horizons: [30, 90, 180]
 # non-trivial, and cost grows sublinearly in batch size, so each cell is capped
 # and scored in one batch. Set eval_max_pairs to 0 to score every pair.
 eval_max_pairs: 5000
+
+# stationarity.py. Read through cfg.get(defaults), so a machine whose
+# config/config.yaml has not caught up still runs without them.
+max_posterior_sd: 0.8        # drop seeds whose state is mostly prior, not data
+stationarity_boot: 199       # bootstrap replicates for the panel nulls
+stationarity_windows: 6      # time windows for the mean/variance drift test

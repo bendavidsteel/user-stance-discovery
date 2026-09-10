@@ -23,9 +23,10 @@ import argparse
 import numpy as np
 import polars as pl
 
-from . import cells as prep
-
 EDGES = [1, 2, 4, 8, 16, 32, 48, 64, 80]
+
+MEAN_STANCE = 'mean stance (what a Gaussian likelihood sees)'
+NEUTRAL_SHARE = 'neutral share (invisible to a Gaussian likelihood)'
 
 
 def bucketed(p, val, val_b, noise, dt, label):
@@ -66,18 +67,15 @@ def show(name, rows, null_rows):
           f"   -> drift sd ~ {np.sqrt(max(span, 0) / 2):.4f}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--data', required=True)
-    ap.add_argument('--bin-factor', type=int, default=8)
-    ap.add_argument('--min-n', type=int, default=5)
-    ap.add_argument('--max-lag', type=int, default=60)
-    args = ap.parse_args()
+def curves(df, meta, min_n=5, max_lag=60, log=print):
+    """Lag-bucketed excess variance for the real cells and a permuted null.
 
-    df, meta = prep.load(args.data, args.bin_factor)
+    Returns {statistic name: {'real': rows, 'null': rows}}, rows as
+    `bucketed` produces them: (lag_days, n_pairs, excess, noise, real-noise).
+    """
     dt = meta['dt']
 
-    cells = df.filter(pl.col('n') >= args.min_n).with_columns([
+    cells = df.filter(pl.col('n') >= min_n).with_columns([
         (pl.col('s_sum') / pl.col('n')).alias('ybar'),
         (pl.col('n_neu') / pl.col('n')).alias('pneu'),
         # within-cell scatter only -- no between-time component
@@ -92,8 +90,8 @@ def main():
         (pl.col('NEU') / pl.col('N')).alias('p'),            # pooled neutral share
     ])
     cells = cells.join(pair.select(['m', 'j', 'v', 'p']), on=['m', 'j'], how='inner')
-    print(f"cells n>={args.min_n} in pairs with >=3 bins: {len(cells)} "
-          f"over {len(pair)} (seed,target) pairs")
+    log(f"cells n>={min_n} in pairs with >=3 bins: {len(cells)} "
+        f"over {len(pair)} (seed,target) pairs")
 
     # Null: permute the cell values within each (seed, target) while holding the
     # time grid fixed. This preserves every lag, weight and noise term exactly
@@ -114,21 +112,63 @@ def main():
     for tag, src in (('real', cells), ('null', perm)):
         p = src.join(src, on=['m', 'j'], suffix='_b')
         p = p.filter(pl.col('t_b') > pl.col('t')).with_columns(
-            (pl.col('t_b') - pl.col('t')).alias('lag')).filter(pl.col('lag') <= args.max_lag)
+            (pl.col('t_b') - pl.col('t')).alias('lag')).filter(pl.col('lag') <= max_lag)
         if tag == 'real':
-            print(f"lagged cell pairs: {len(p):,}")
+            log(f"lagged cell pairs: {len(p):,}")
         noise_y = pl.col('v') * (1.0 / pl.col('n') + 1.0 / pl.col('n_b'))
         noise_p = (pl.col('p') * (1 - pl.col('p'))
                    * (1.0 / pl.col('n') + 1.0 / pl.col('n_b')))
         out[tag] = {
-            'mean stance (what a Gaussian likelihood sees)':
-                bucketed(p, 'ybar', 'ybar_b', noise_y, dt, tag),
-            'neutral share (invisible to a Gaussian likelihood)':
-                bucketed(p, 'pneu', 'pneu_b', noise_p, dt, tag),
+            MEAN_STANCE: bucketed(p, 'ybar', 'ybar_b', noise_y, dt, tag),
+            NEUTRAL_SHARE: bucketed(p, 'pneu', 'pneu_b', noise_p, dt, tag),
         }
 
-    for name in out['real']:
-        show(name, out['real'][name], out['null'][name])
+    return {name: {'real': out['real'][name], 'null': out['null'][name]}
+            for name in out['real']}
+
+
+def verdict(rows, null_rows, tail_frac=0.34):
+    """Does the drift variance saturate with lag, or keep growing?
+
+    `real - null` is clustering + 2 Var(drift) (1 - corr(lag)); the clustering
+    term is lag-independent, so its growth from the shortest lag is what the
+    drift contributes. A plateau means the drift is bounded (mean-reverting);
+    growth sustained into the longest lags is what a random walk looks like.
+    """
+    d = np.array([e - n for (*_, e), (*_, n) in zip(rows, null_rows, strict=True)])
+    lags = np.array([r[0] for r in rows])
+    span = float(d[-1] - d[0])
+    n_tail = max(2, int(round(len(d) * tail_frac)))
+    tail_span = float(d[-1] - d[-n_tail])
+    # share of the total rise still being accumulated over the last lags
+    tail_share = tail_span / span if span > 0 else float('nan')
+    return {
+        'lags_days': lags,
+        'excess_over_null': d,
+        'span': span,
+        'drift_sd': float(np.sqrt(max(span, 0.0) / 2)),
+        'tail_share': tail_share,
+        'tail_lags_days': (float(lags[-n_tail]), float(lags[-1])),
+        'saturates': bool(span > 0 and tail_share < 0.1),
+    }
+
+
+def main():
+    # deferred: `curves` and `verdict` are plain numpy, and loading the cells
+    # is the only part of this module that needs jax
+    from . import cells as prep
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--data', required=True)
+    ap.add_argument('--bin-factor', type=int, default=8)
+    ap.add_argument('--min-n', type=int, default=5)
+    ap.add_argument('--max-lag', type=int, default=60)
+    args = ap.parse_args()
+
+    df, meta = prep.load(args.data, args.bin_factor)
+    out = curves(df, meta, args.min_n, args.max_lag)
+    for name, got in out.items():
+        show(name, got['real'], got['null'])
 
 
 if __name__ == '__main__':
