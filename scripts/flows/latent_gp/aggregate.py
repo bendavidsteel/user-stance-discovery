@@ -22,6 +22,7 @@ and importing the package used to take 2GB from a card that was classifying.
 """
 
 import glob
+import hashlib
 import os
 import re
 
@@ -38,6 +39,57 @@ BIN = '2d'
 # excluded among foreign seeds because they are not individuals holding stances
 KEEP_TYPES = ['politician', 'influencer']
 DROP_FOREIGN_SUBTYPES = ['media', 'state']
+
+
+# Provenance written beside each part and beside the merged aggregate, so a
+# rebuild can tell which outputs are still the ones their sources imply.
+SIDECAR = '.sources'
+
+
+def file_digest(path, chunk=1 << 22):
+    h = hashlib.blake2b(digest_size=16)
+    with open(path, 'rb') as fh:
+        for block in iter(lambda: fh.read(chunk), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def source_digest(*paths):
+    """Fingerprint of the files an output is built from.
+
+    Content, not mtime: weeks get reclassified in place, and a rebuild that
+    kept a part because its timestamp happened to look newer would be silent.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for path in sorted(paths):
+        h.update(f'{os.path.basename(path)}:{file_digest(path)}|'.encode())
+    return h.hexdigest()
+
+
+def read_sidecar(path):
+    """The digest recorded beside an output, or None if there is not one."""
+    try:
+        with open(path) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def write_sidecar(path, digest):
+    with open(path, 'w') as fh:
+        fh.write(digest + '\n')
+
+
+def parts_digest(parts_dir):
+    """Fingerprint of the whole part set, from the digests already recorded.
+
+    Cheap because it reads the sidecars rather than the parts, so checking
+    whether the merged aggregate is current costs no I/O worth counting.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for side in sorted(glob.glob(os.path.join(parts_dir, f'*_cells.parquet.zstd{SIDECAR}'))):
+        h.update(f'{os.path.basename(side)}:{read_sidecar(side)}|'.encode())
+    return h.hexdigest()
 
 
 def week_of(path):
@@ -104,27 +156,38 @@ def _aggregate_week(df, resolution):
 
 
 def build_parts(stance_dir, probs_dir, parts_dir, resolution, log=print):
-    """Aggregate every week that has probabilities and is not already done."""
+    """Aggregate every week whose part does not match its sources.
+
+    A part with no recorded digest is rebuilt: without provenance there is no
+    way to claim it matches, and claiming it wrongly is how a reclassified week
+    stays out of the aggregate.
+    """
     ready, missing = weeks_with_probs(stance_dir, probs_dir)
     if missing:
         log(f'{len(missing)} weeks have labels but no probabilities, skipped: '
             f'{missing[0]} .. {missing[-1]}')
     os.makedirs(parts_dir, exist_ok=True)
-    log(f'{len(ready)} weeks with probabilities')
 
-    for i, ((year, week), s_path, p_path) in enumerate(ready):
+    todo = []
+    for (year, week), s_path, p_path in ready:
         out = os.path.join(parts_dir, f'{year}_{week:02d}_cells.parquet.zstd')
-        if os.path.exists(out):
+        want = source_digest(s_path, p_path)
+        if os.path.exists(out) and read_sidecar(out + SIDECAR) == want:
             continue
+        todo.append(((year, week), s_path, p_path, out, want))
+    log(f'{len(ready)} weeks with probabilities, {len(todo)} to build')
+
+    for i, ((year, week), s_path, p_path, out, want) in enumerate(todo):
         pairs = _pairs(s_path, p_path)
         agg = None if pairs is None else _aggregate_week(pairs, resolution)
         if agg is None:
             log(f'  {year}_{week}: no usable pairs')
             continue
         agg.write_parquet(out, compression='zstd')
+        write_sidecar(out + SIDECAR, want)
         if (i + 1) % 10 == 0:
-            log(f'  {i + 1}/{len(ready)} weeks')
-    return len(ready)
+            log(f'  {i + 1}/{len(todo)} weeks')
+    return len(ready), len(todo)
 
 
 def merge_parts(parts_dir, cache, log=print):
@@ -148,11 +211,14 @@ def merge_parts(parts_dir, cache, log=print):
 
 
 def build(stance_dir, probs_dir, parts_dir, cache, resolution=6, log=print):
-    if os.path.exists(cache):
-        log(f'using cached aggregate {cache}')
-        return
+    """Bring the parts and the merged aggregate up to date with their sources."""
     build_parts(stance_dir, probs_dir, parts_dir, resolution, log=log)
+    want = parts_digest(parts_dir)
+    if os.path.exists(cache) and read_sidecar(cache + SIDECAR) == want:
+        log(f'aggregate {cache} matches its parts')
+        return
     merge_parts(parts_dir, cache, log=log)
+    write_sidecar(cache + SIDECAR, want)
 
 
 def main():

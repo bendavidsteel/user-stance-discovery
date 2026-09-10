@@ -37,7 +37,7 @@ import os
 import numpy as np
 import polars as pl
 
-from . import calibrate, cells, fit as fit_mod, probs
+from . import aggregate, calibrate, cells, fit as fit_mod, probs
 
 
 @dataclasses.dataclass(frozen=True)
@@ -190,13 +190,13 @@ def data_tag(path):
     """Fingerprint of the cell aggregate.
 
     The config tag deliberately ignores cells_path, so that moving the file does
-    not invalidate the cache -- but then rebuilding the aggregate in place would
-    silently reuse latents fitted on the old data. Row count and lattice width
-    come from the parquet footer, so this costs no scan.
+    not invalidate the cache -- but then rebuilding the aggregate in place has
+    to. Reads the provenance aggregate.py records beside the file, and hashes
+    the file itself when there is none. Either way it tracks the contents:
+    a row count and a column count do not move when a week is reclassified.
     """
-    lf = pl.scan_parquet(path)
-    body = (f'{lf.select(pl.len()).collect().item()}|'
-            f'{len(cells.arch_cols(lf.collect_schema().names()))}')
+    body = aggregate.read_sidecar(path + aggregate.SIDECAR) \
+        or aggregate.file_digest(path)
     return hashlib.blake2b(body.encode(), digest_size=4).hexdigest()
 
 
