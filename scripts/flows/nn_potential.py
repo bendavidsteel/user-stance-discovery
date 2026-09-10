@@ -299,8 +299,62 @@ def load_seed_metadata(cfg):
     ]).unique('SeedName')
 
 
+def _incremental_gain(d2, p2, m2, c, c_dm, c_pm):
+    """Correlations and what the model adds over momentum, from six moments.
+
+    Shared by the pooled metrics and the per-dimension ones, so the two are the
+    same estimator applied to different moments rather than two definitions
+    that could drift apart.
+    """
+    rho = c / np.sqrt(d2 * p2) if d2 > 0 and p2 > 0 else 0.0
+    rho_dm = c_dm / np.sqrt(d2 * m2) if d2 > 0 and m2 > 0 else 0.0
+    rho_pm = c_pm / np.sqrt(p2 * m2) if p2 > 0 and m2 > 0 else 0.0
+    denom = 1.0 - rho_pm ** 2
+    combined = ((rho ** 2 + rho_dm ** 2 - 2 * rho * rho_dm * rho_pm) / denom
+                if denom > 1e-6 else max(rho ** 2, rho_dm ** 2))
+    return float(rho), float(rho_dm), float(rho_pm), float(np.clip(combined, 0, 1))
+
+
+def per_dimension_metrics(dim_moments, floor=1e-6):
+    """The same gain computed within each moving dimension, then averaged.
+
+    Pooled rho weights a dimension by its share of the displacement variance,
+    so a configuration whose motion lives in one dimension is scored on an
+    easier problem than one spread over six, and n_fast stops being a fair
+    comparison. Averaging per-dimension rho removes the weighting; the price is
+    that it no longer asks whether the joint direction is right.
+
+    Dimensions that never move are excluded rather than scored, so they neither
+    help nor hurt -- spurious_drift_ratio is what keeps that visible.
+    """
+    d2, p2, m2, c, c_dm, c_pm = (np.asarray(np.mean(a, axis=0), dtype=float).ravel()
+                                 for a in dim_moments)
+    if d2.size == 0 or not np.isfinite(d2).any() or d2.max() <= 0:
+        return {}
+    moving = d2 > floor * d2.max()
+    if not moving.any():
+        return {}
+
+    rows = [_incremental_gain(d2[k], p2[k], m2[k], c[k], c_dm[k], c_pm[k])
+            for k in np.flatnonzero(moving)]
+    rho = float(np.mean([r[0] for r in rows]))
+    rho_dm = float(np.mean([r[1] for r in rows]))
+    gain = float(np.mean([r[3] - r[1] ** 2 for r in rows]))
+    frozen = p2[~moving].sum()
+    return {
+        'direction_rho_per_dim': rho,
+        'momentum_ceiling_per_dim': float(np.mean([r[1] ** 2 for r in rows])),
+        'ceiling_gain_per_dim': gain,
+        'n_moving_dims': int(moving.sum()),
+        # predicted motion in directions that never move; excluded from the
+        # average above, so it would otherwise be a free pass
+        'spurious_drift_ratio': float(frozen / d2[moving].sum()),
+    }
+
+
 def compute_metrics(model_losses, baseline_losses, pred_losses=None, dots=None,
-                    mom_losses=None, dots_dm=None, dots_pm=None):
+                    mom_losses=None, dots_dm=None, dots_pm=None,
+                    dim_moments=None):
     """Evaluation metrics from per-sample losses, mean and median based.
 
     The mean ratio is dominated by the minority of pairs with a near-zero
@@ -344,6 +398,8 @@ def compute_metrics(model_losses, baseline_losses, pred_losses=None, dots=None,
     c = float(np.mean(dots))
     rho = c / np.sqrt(d2 * p2) if d2 > 0 and p2 > 0 else 0.0
     ratio = np.sqrt(p2 / d2) if d2 > 0 else 0.0
+    if dim_moments is not None:
+        out.update(per_dimension_metrics(dim_moments))
     out.update({
         'displacement_ratio': float(ratio),
         'direction_rho': float(rho),
@@ -365,13 +421,8 @@ def compute_metrics(model_losses, baseline_losses, pred_losses=None, dots=None,
     if not all(np.isfinite(v) for v in (m2, c_dm, c_pm)):
         raise ValueError('non-finite momentum moments: pairs without a '
                          'predecessor reached the scorer')
-    rho_dm = c_dm / np.sqrt(d2 * m2) if d2 > 0 and m2 > 0 else 0.0
-    rho_pm = c_pm / np.sqrt(p2 * m2) if p2 > 0 and m2 > 0 else 0.0
     # variance of the observed motion explained by the two predictors together
-    denom = 1.0 - rho_pm ** 2
-    combined = ((rho ** 2 + rho_dm ** 2 - 2 * rho * rho_dm * rho_pm) / denom
-                if denom > 1e-6 else max(rho ** 2, rho_dm ** 2))
-    combined = float(np.clip(combined, 0.0, 1.0))
+    _, rho_dm, rho_pm, combined = _incremental_gain(d2, p2, m2, c, c_dm, c_pm)
     out.update({
         'momentum_rho': rho_dm,
         'momentum_ceiling': rho_dm ** 2,
@@ -420,7 +471,8 @@ def evaluate_pairs(model, frame, key, batch_size):
     """Score (x0, x1) pairs in the largest batches the caller allows."""
     model = eqx.tree_inference(model, True)
     names = ('model', 'base', 'pred', 'dot', 'mom', 'dot_dm', 'dot_pm')
-    parts = {k: [] for k in names}
+    dim_names = ('d2', 'p2', 'm2', 'dp', 'dm', 'pm')
+    parts = {k: [] for k in names + dim_names}
     x0 = np.stack(frame['x0'].to_numpy())[:, None, :]
     x1 = np.stack(frame['x1'].to_numpy())[:, None, :]
     xm1 = np.stack(frame['xm1'].to_numpy())[:, None, :]
@@ -432,9 +484,11 @@ def evaluate_pairs(model, frame, key, batch_size):
         out = _eval_batch(model, jnp.asarray(t0[sl]), jnp.asarray(t1[sl]),
                           jnp.asarray(x0[sl]), jnp.asarray(x1[sl]), subkey,
                           jnp.asarray(xm1[sl]))
-        for name, arr in zip(names, out):
+        for name, arr in zip(names + dim_names, out):
             parts[name].append(np.array(arr))
-    return tuple(np.concatenate(parts[k]) for k in names)
+    # one trailing element, so compute_metrics(*evaluate_pairs(...)) still lines up
+    return (tuple(np.concatenate(parts[k]) for k in names)
+            + (tuple(np.concatenate(parts[k]) for k in dim_names),))
 
 
 def subsample(cell, cfg):
@@ -545,13 +599,18 @@ def _eval_batch(model, t0, t1, y0, y1, key, ym1=None):
     d = y1 - y0
     m = jnp.zeros_like(p) if ym1 is None else -(y0 - ym1)
     axes = (-2, -1)
+    # the same six moments again, keeping the dimension axis: per_dimension_metrics
+    # needs them within a dimension, and the pooled sums cannot be split back up
+    per = lambda a: jnp.sum(a, axis=-2)
     return (compute_per_sample_mse(y_pred, y1),
             compute_per_sample_mse(y0, y1),
             jnp.sum(jnp.square(p), axis=axes),
             jnp.sum(d * p, axis=axes),
             jnp.sum(jnp.square(m), axis=axes),
             jnp.sum(d * m, axis=axes),
-            jnp.sum(p * m, axis=axes))
+            jnp.sum(p * m, axis=axes),
+            per(jnp.square(d)), per(jnp.square(p)), per(jnp.square(m)),
+            per(d * p), per(d * m), per(p * m))
 
 
 def evaluate_dataloader(model, dataloader, key, with_displacement=False):

@@ -96,6 +96,72 @@ def check_displacement_identity():
     print('  collapsed model: rho=0, ceiling=0, skill=0 -- distinguishable')
 
 
+def check_per_dimension_gain():
+    """The per-dimension gain must not depend on how many dimensions move.
+
+    Pooled rho already does not, so long as nothing moves in the frozen
+    directions. What breaks it is drift predicted where there is none: that
+    lands in E|p|^2 alone, so a configuration with one moving dimension is
+    charged for five directions of it and one with six for none. The
+    per-dimension average scores only the dimensions that move and reports the
+    rest as spurious_drift_ratio.
+    """
+    rng = np.random.default_rng(0)
+    n, K, r = 20_000, 6, 0.5
+
+    def build(n_moving, spurious):
+        d = np.zeros((n, K))
+        p = np.zeros((n, K))
+        m = np.zeros((n, K))
+        for k in range(n_moving):
+            d[:, k] = rng.normal(size=n)
+            p[:, k] = r * d[:, k] + np.sqrt(1 - r ** 2) * rng.normal(size=n)
+            m[:, k] = 0.3 * d[:, k] + np.sqrt(1 - 0.09) * rng.normal(size=n)
+        for k in range(n_moving, K):
+            p[:, k] = spurious * rng.normal(size=n)
+        return nnp.compute_metrics(
+            ((d - p) ** 2).sum(1), (d ** 2).sum(1), (p ** 2).sum(1), (d * p).sum(1),
+            (m ** 2).sum(1), (d * m).sum(1), (p * m).sum(1),
+            dim_moments=(d ** 2, p ** 2, m ** 2, d * p, d * m, p * m))
+
+    for spurious in (0.0, 0.5):
+        got = {nm: build(nm, spurious) for nm in (1, 2, 3, 6)}
+        for nm, met in got.items():
+            assert met['n_moving_dims'] == nm, (nm, met['n_moving_dims'])
+            assert abs(met['direction_rho_per_dim'] - r) < 0.02, (nm, met)
+        spread = max(m['ceiling_gain_per_dim'] for m in got.values()) \
+            - min(m['ceiling_gain_per_dim'] for m in got.values())
+        assert spread < 0.01, ('per-dim gain tracks the dimension count', spread)
+        pooled = max(m['ceiling_gain'] for m in got.values()) \
+            - min(m['ceiling_gain'] for m in got.values())
+        print(f'  spurious={spurious}: per-dim gain spread {spread:.5f}, '
+              f'pooled {pooled:.5f}, '
+              f'ratio reported {got[1]["spurious_drift_ratio"]:.3f}')
+        if spurious == 0.0:
+            assert pooled < 0.01, pooled          # nothing to leak, so pooled holds too
+        else:
+            # the leak is what the pooled number cannot separate out
+            assert pooled > 0.05, pooled
+            assert got[6]['spurious_drift_ratio'] == 0.0, got[6]
+
+    # a dimension carrying almost none of the motion still counts once
+    d = np.zeros((n, K)); p = np.zeros((n, K)); m = np.zeros((n, K))
+    for k in range(K):
+        rk = 0.9 if k == 0 else 0.05
+        sd = 10.0 if k == 0 else 1.0
+        d[:, k] = rng.normal(0, sd, n)
+        p[:, k] = rk * d[:, k] + sd * np.sqrt(1 - rk ** 2) * rng.normal(size=n)
+        m[:, k] = 0.3 * d[:, k] + sd * np.sqrt(1 - 0.09) * rng.normal(size=n)
+    met = nnp.compute_metrics(
+        ((d - p) ** 2).sum(1), (d ** 2).sum(1), (p ** 2).sum(1), (d * p).sum(1),
+        (m ** 2).sum(1), (d * m).sum(1), (p * m).sum(1),
+        dim_moments=(d ** 2, p ** 2, m ** 2, d * p, d * m, p * m))
+    assert met['direction_rho'] > 0.8, met            # pooled follows the big dimension
+    assert abs(met['direction_rho_per_dim'] - (0.9 + 5 * 0.05) / 6) < 0.02, met
+    print(f"  variance-weighted rho {met['direction_rho']:.4f} vs "
+          f"unweighted {met['direction_rho_per_dim']:.4f}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         cells = os.path.join(td, 'cells.parquet.zstd')
@@ -170,6 +236,8 @@ def main():
 
     print('displacement decomposition:')
     check_displacement_identity()
+    print('per-dimension gain:')
+    check_per_dimension_gain()
     print('\nnested-split pipeline smoke test passed')
 
 
