@@ -19,10 +19,10 @@
 #   wandb sweep --project potential_landscape_training scripts/sweeps/joint.yaml
 #   PATH=scripts/flows/.venv/bin:$PATH wandb agent <entity>/<project>/<sweep_id>
 #
-# Run ONE agent. Two on a card split its throughput rather than adding to it --
-# measured 203W with two trials against 215W with one -- so each runs at about
-# half speed, and against a per-trial wall-clock budget that turns healthy
-# trials into killed ones.
+# Run ONE agent, on ONE card, leaving the other free. Two on a card split its
+# throughput rather than adding to it -- measured 203W with two trials against
+# 215W with one -- so each runs at about half speed, and against a per-trial
+# wall-clock budget that turns healthy trials into killed ones.
 #
 # Run scripts/sweeps/watchdog.sh alongside them. Some configurations drive the
 # solver into batches that take minutes each; one such trial ran five and a
@@ -36,6 +36,11 @@ method: bayes
 metric:
   name: objective
   goal: maximize
+
+# Without this the search never ends: five parameters are continuous, so the
+# space cannot be exhausted the way a grid can. One card turns over about 19
+# trials a day, so this is a bit under a week.
+run_cap: 120
 
 command:
   - ${env}
@@ -99,14 +104,24 @@ parameters:
   # Discrete, like the other GPFA parameters and for the same reason: drawn from
   # a continuous range every soft or mixture trial is its own cache key and pays
   # for a full latent fit, and at this scale that is most of the trial budget.
+  #
+  # The range extends past what calibration implies because the data asked it
+  # to: across 42 trials every one of the top ten sat at 1.8, which was the
+  # largest value on offer, so the optimum was outside the grid rather than in
+  # it. 3.4 is the top of the bracket the per-benchmark accuracy spread allows.
   latents.obs_temperature:
-    values: [1.0, 1.33, 1.8]
+    values: [1.0, 1.33, 1.8, 2.5, 3.4]
 
   # --- latent-GP factor model ---
-  # The first sweep put its two best trials at fast_tau=40 and bin_factor=4,
-  # both the smallest value offered, so the ranges extend downward rather than
-  # narrowing around them. n_fast=0 froze the latent and took rho to 0.03, so
-  # at least one drifting dimension is required.
+  # fast_tau is the one axis that has settled inside its range: 20 took five of
+  # the top ten and 10, 40 and 80 all appear, so it is left alone.
+  #
+  # n_fast sits at its floor and cannot be widened -- n_fast=0 freezes the
+  # latent and takes rho to 0.03 -- so 4 fills the gap instead. Note that the
+  # pooled objective penalises small n_fast: predicted drift in a frozen
+  # direction lands in E|p|^2 and nowhere else, which cost about a third of rho
+  # at n_fast=1 on synthetic moments. ceiling_gain_per_dim is logged beside it
+  # and does not, so the two together say whether the preference is real.
   #
   # fast_kind decides whether a drifting dimension is confined. Both kinds are
   # rough and their tau means the same thing, so the pair isolates confinement.
@@ -120,7 +135,7 @@ parameters:
   n_dims:
     values: [3, 4, 5, 6]
   latents.n_fast:
-    values: [1, 2, 3, 6]
+    values: [1, 2, 3, 4, 6]
   latents.fast_kind:
     values: [wiener, ou]
   latents.fast_tau:
@@ -136,8 +151,14 @@ parameters:
     values: [const, wiener, ou]
   latents.slow_tau:
     values: [640.0, 2560.0]
+  # 8 was the largest value on offer and won monotonically over 4 and 2, so 16
+  # is here to find out whether that trend continues or the objective is simply
+  # rewarding a coarser grid. Treat a win at 16 with suspicion: the grid spacing
+  # is 2 * bin_factor days, so at 16 it cannot resolve the short fast_tau values
+  # that the same trials prefer. 2 is dropped -- worst of the three and four
+  # times the cells of 8, so most of a budget for the least of the evidence.
   latents.bin_factor:
-    values: [2, 4, 8]
+    values: [4, 8, 16]
 
   # --- landscape model ---
   # sigma above ~0.7 and lr above ~0.02 drove the drift field to zero inside
