@@ -2,6 +2,10 @@
 
 Runs between extraction and de-duplication: a French and an English phrasing of the
 same target only merge if they are in the same language first.
+
+Which targets are non-English is decided from the posts they appear in rather than
+from the targets themselves, which are far too short to place among dozens of
+languages.
 """
 
 import datetime
@@ -27,10 +31,10 @@ HAS_LETTER = r'[^\W\d_]'
 HANDLE = r'^@'
 DIGIT_TOKEN = r'^\S*\d\S*$'
 
-# Lingua returns no language at all when the runner-up is within this relative
-# distance of the winner. Short phrases are easy to detect wrongly, and a wrong
-# detection sends an English target through the translator, so leave those alone.
-MIN_RELATIVE_DISTANCE = 0.4
+# A target is judged by the posts it appears in, not by its own text: two words are
+# far too little for a detector to place among dozens of languages, but the posts
+# carrying them are not. A target needs this share of non-English posts to be sent.
+MIN_NON_ENGLISH_SHARE = 0.4
 
 # A translation of a short phrase is itself short. Anything longer is the model
 # explaining itself, apologising, or looping, none of which is a target.
@@ -49,46 +53,60 @@ CHUNK_SIZE = 100_000
 # Longer than any real noun phrase, and the prompt has to stay inside max_model_len.
 MAX_TARGET_CHARS = 300
 
+# Saying these are labels rather than sentences is what stops the model translating
+# names ('le pen' -> 'the pen') and carrying French articles into English, which
+# leaves the result unable to merge with the English phrasing it should join.
 PROMPT = (
-    'Translate the following {language}phrase into English. '
-    'Reply with only the translation: no quotes, no explanation, no notes. '
-    'Write proper names the way they are normally written in English. '
-    'If the phrase is already English, reply with it unchanged.\n\n'
+    'The phrase below is a topic label taken from a social media post. '
+    'If it is not in English, translate it into English. '
+    'If it is already English, reply with it unchanged. '
+    'Keep proper names, place names, organisations, publications and abbreviations as '
+    'they are normally written in English instead of translating them word by word. '
+    'Do not begin your reply with "the", "a" or "an". '
+    'Reply with only the phrase: no quotes, no explanation, no notes.\n\n'
     'Phrase: {target}'
 )
+LEADING_ARTICLE = r'(?i)^(the|a|an)\s+'
 
 
-def load_unique_targets(target_dir: str, start_date: datetime.datetime) -> pl.DataFrame:
-    """Every distinct target in the monthly base target files, with its frequency."""
+def load_posts(target_dir: str, start_date: datetime.datetime) -> pl.DataFrame:
+    """The posts in the monthly base target files, with the targets drawn from each."""
     files = [os.path.join(target_dir, f) for f in os.listdir(target_dir)
              if re.match(r'targets_\d{4}_\d{1,2}\.parquet\.zstd$', f)]
     return (pl.scan_parquet(files)
-            .select(['createtime', 'Targets'])
+            .select(['createtime', 'Document', 'Targets'])
             .filter(pl.col('createtime') >= start_date)
-            .select(pl.col('Targets').explode().alias('Target'))
-            .drop_nulls()
-            .group_by('Target').len().rename({'len': 'Count'})
+            .select(['Document', 'Targets'])
             .collect(engine='streaming'))
 
 
-def detect_languages(df: pl.DataFrame, low_accuracy: bool = False) -> pl.DataFrame:
-    """Add the detected language of each target, null where the detector is unsure."""
+def detect_post_languages(df: pl.DataFrame, low_accuracy: bool = False) -> pl.DataFrame:
+    """Add the detected language of each post."""
     from lingua import LanguageDetectorBuilder
 
-    builder = LanguageDetectorBuilder.from_all_languages()\
-        .with_minimum_relative_distance(MIN_RELATIVE_DISTANCE)\
-        .with_preloaded_language_models()
+    builder = LanguageDetectorBuilder.from_all_languages().with_preloaded_language_models()
     if low_accuracy:
         builder = builder.with_low_accuracy_mode()
     detector = builder.build()
 
-    targets = df['Target'].to_list()
+    posts = df['Document'].fill_null('').to_list()
     languages = []
-    for i in tqdm(range(0, len(targets), CHUNK_SIZE), desc='detecting'):
-        batch = targets[i:i + CHUNK_SIZE]
+    for i in tqdm(range(0, len(posts), CHUNK_SIZE), desc='detecting'):
+        batch = posts[i:i + CHUNK_SIZE]
         languages.extend(l.name.lower() if l is not None else None
                          for l in detector.detect_languages_in_parallel_of(batch))
-    return df.with_columns(pl.Series('Language', languages, dtype=pl.String))
+    return df.with_columns(pl.Series('PostLanguage', languages, dtype=pl.String))
+
+
+def score_targets(df: pl.DataFrame) -> pl.DataFrame:
+    """Every distinct target, its frequency, and how English the posts using it are."""
+    return (df.select(['PostLanguage', 'Targets'])
+            .explode('Targets').rename({'Targets': 'Target'}).drop_nulls('Target')
+            .group_by('Target').agg(
+                pl.len().alias('Count'),
+                (pl.col('PostLanguage') != 'english').mean().alias('NonEnglishShare'),
+                pl.col('PostLanguage').drop_nulls().mode().first().alias('Language'))
+            .with_columns(pl.col('Count').cast(pl.UInt32)))
 
 
 def needs_translation(df: pl.DataFrame, min_count: int) -> pl.Series:
@@ -100,7 +118,7 @@ def needs_translation(df: pl.DataFrame, min_count: int) -> pl.Series:
         & ~pl.col('Target').str.contains(HANDLE)
         & ~pl.col('Target').str.contains(DIGIT_TOKEN)
         & (pl.col('Target').str.contains(NON_LATIN)
-           | (pl.col('Language').is_not_null() & (pl.col('Language') != 'english')))
+           | (pl.col('NonEnglishShare') >= MIN_NON_ENGLISH_SHARE))
     )
 
 
@@ -117,7 +135,8 @@ def clean_translation(text: str, target: str) -> str | None:
         return None
     if re.search(META_REPLY, text):
         return None
-    return None if text == target.lower() else text
+    text = re.sub(LEADING_ARTICLE, '', text).strip()
+    return None if not text or text == target.lower() else text
 
 
 def translate(df: pl.DataFrame, config, out_path: str, done_df: pl.DataFrame) -> pl.DataFrame:
@@ -137,21 +156,20 @@ def translate(df: pl.DataFrame, config, out_path: str, done_df: pl.DataFrame) ->
     tokenizer = llm.get_tokenizer()
     sampling_params = SamplingParams(temperature=0.0, max_tokens=MAX_OUTPUT_TOKENS)
 
-    def to_prompt(target: str, language: str | None) -> str:
-        content = PROMPT.format(language=f'{language} ' if language else '', target=target)
+    def to_prompt(target: str) -> str:
         return tokenizer.apply_chat_template(
-            [{'role': 'user', 'content': content}],
+            [{'role': 'user', 'content': PROMPT.format(target=target)}],
             tokenize=False, add_generation_prompt=True, enable_thinking=False,
         )
 
     # Qwen3.5 reasons by default, which would cost far more tokens than the answer.
-    example = to_prompt('les états-unis', 'french')
+    example = to_prompt('les états-unis')
     assert '<think>\n\n</think>' in example, f'thinking is still on:\n{example}'
     print(f'example prompt:\n{example}\n')
 
     for i in tqdm(range(0, df.height, CHUNK_SIZE), desc='translating'):
         chunk = df.slice(i, CHUNK_SIZE)
-        prompts = [to_prompt(t, l) for t, l in zip(chunk['Target'], chunk['Language'])]
+        prompts = [to_prompt(t) for t in chunk['Target']]
         outputs = llm.generate(prompts, sampling_params)
         chunk = chunk.with_columns(pl.Series(
             'TargetEnglish',
@@ -187,19 +205,24 @@ def main(config):
     target_dir = config.base_target_path
     out_path = os.path.join(os.path.dirname(target_dir.rstrip('/')), TRANSLATION_FILE)
 
-    df = load_unique_targets(target_dir, START_DATE)
-    print(f'{df.height:,} unique targets, {df["Count"].sum():,} occurrences')
+    post_df = load_posts(target_dir, START_DATE)
+    print(f'{post_df.height:,} posts')
 
-    df = detect_languages(df, low_accuracy=bool(config.get('translate_low_accuracy', False)))
-    print(df.group_by('Language').agg(pl.len().alias('targets'), pl.col('Count').sum().alias('occurrences'))
-            .sort('targets', descending=True).head(20))
+    post_df = detect_post_languages(post_df, low_accuracy=bool(config.get('translate_low_accuracy', False)))
+    print(post_df.group_by('PostLanguage').agg(pl.len().alias('posts'))
+                 .sort('posts', descending=True).head(10))
+
+    df = score_targets(post_df)
+    print(f'{df.height:,} unique targets, {df["Count"].sum():,} occurrences')
+    del post_df
 
     df = df.filter(needs_translation(df, int(config.get('translate_min_count', 1))))
     print(f'{df.height:,} targets to translate, {df["Count"].sum():,} occurrences')
 
     done_df = pl.read_parquet(out_path) if os.path.exists(out_path) else \
         pl.DataFrame(schema={'Target': pl.String, 'Count': pl.UInt32,
-                             'Language': pl.String, 'TargetEnglish': pl.String})
+                             'NonEnglishShare': pl.Float64, 'Language': pl.String,
+                             'TargetEnglish': pl.String})
     if done_df.height:
         df = df.join(done_df.select('Target'), on='Target', how='anti')
         print(f'{done_df.height:,} already translated, {df.height:,} left')
