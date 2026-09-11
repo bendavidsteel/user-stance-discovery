@@ -441,5 +441,17 @@ def main(cfg):
 
     logging.info(f"\nResults saved to {dim_label_path}")
 
+    # Beside the labels rather than in them: distinctness is a property of the
+    # table, not of any one dimension, and dimension_table keys the labels by
+    # dimension index.
+    quality = latent_space.ranking_quality(
+        components, latent_space.target_volumes(cfg, targets))
+    if quality:
+        quality_path = os.path.join(
+            trend_path, f'{latent_space.name(cfg)}_dimension_quality.json')
+        with open(quality_path, 'w') as f:
+            json.dump(quality, f, indent=2)
+        logging.info(f"Ranking quality saved to {quality_path}")
+
 if __name__ == '__main__':
     main()
