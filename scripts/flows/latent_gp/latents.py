@@ -23,9 +23,9 @@ A rolled-back origin (`spec.origin_offset_days`) also truncates the grid at the
 window's end, so neither state sees past the period being scored.
 
 `obs_model` chooses how much of the stance classifier's output the fit sees:
-its label ('hard'), its label through a measured error channel ('channel'), its
-probabilities as expected counts ('soft'), or its probabilities as soft
-evidence ('mixture'). See probs.py, and calibrate.py for the channel.
+its label ('hard'), its label through a measured error channel ('channel'), or
+its probabilities as expected counts ('soft'). See probs.py, and calibrate.py
+for the channel.
 """
 
 import dataclasses
@@ -61,7 +61,7 @@ class LatentConfig:
     infer_iters: int = 15
     min_target_volume: int = 400
     interp_days: float = 0.0        # 0 = keep the native bin grid
-    obs_model: str = 'hard'         # hard | channel | soft | mixture
+    obs_model: str = 'hard'         # hard | channel | soft
     obs_temperature: float = 1.0    # >1 flattens the classifier posterior
     prob_resolution: int = 6        # simplex lattice spacing is 1/resolution
     prob_floor: float = 0.01        # uniform mass mixed into each lattice point
@@ -125,7 +125,7 @@ class LatentConfig:
 # the two frames one fit produces, as indices into what _fit returns
 LATENTS, LOADINGS = 0, 1
 
-OBS_MODELS = ('hard', 'channel', 'soft', 'mixture')
+OBS_MODELS = ('hard', 'channel', 'soft')
 _PROB_FIELDS = frozenset({'obs_temperature', 'prob_resolution', 'prob_floor'})
 _CHANNEL_FIELDS = frozenset({'calibration_path'})
 
@@ -158,14 +158,14 @@ def _unused_by_mix(n_fast, n_dims, slow_kind):
     return frozenset(unused)
 
 
-def observation(df, train_mask, obs_model, temperature=1.0, resolution=6,
+def observation(df, obs_model, temperature=1.0, resolution=6,
                 floor=0.01, calibration_path=''):
     """Category counts per the observation model, plus its lattice and log ratios.
 
-    'soft' and 'mixture' read the same lattice counts, so they differ in the
-    likelihood alone rather than in how much of the classifier's output
-    survived quantisation. pi is a property of the classifier and global to the
-    fit, so like W and b it is taken from training cells only.
+    'soft' collapses the lattice counts back onto three expected counts, so
+    what it loses against the labels is quantisation alone. 'channel' keeps the
+    corner counts and a log-likelihood-ratio row per corner, which the
+    soft-evidence site consumes.
     """
     if obs_model not in OBS_MODELS:
         raise ValueError(f'obs_model must be one of {OBS_MODELS}')
@@ -184,16 +184,10 @@ def observation(df, train_mask, obs_model, temperature=1.0, resolution=6,
         return df, n_arch, calibrate.channel_log_ratio(cal['confusion'])
 
     q = probs.archetypes(resolution, temperature, floor)
-    counts = cells.lattice(df, resolution)
-    soft = counts @ q
-    df = df.with_columns(pl.Series('n_neg', soft[:, 0]),
-                         pl.Series('n_neu', soft[:, 1]),
-                         pl.Series('n_pos', soft[:, 2]))
-    if obs_model == 'soft':
-        return df, None, None
-    tr = soft[train_mask]
-    pi = probs.marginal(tr[:, 0], tr[:, 1], tr[:, 2])
-    return df, counts, probs.log_likelihood_ratio(q, pi)
+    soft = cells.lattice(df, resolution) @ q
+    return df.with_columns(pl.Series('n_neg', soft[:, 0]),
+                           pl.Series('n_neu', soft[:, 1]),
+                           pl.Series('n_pos', soft[:, 2])), None, None
 
 
 def data_tag(path):
@@ -340,7 +334,7 @@ def _fit(lcfg, spec, seed_split, log):
                          'origin_offset_days against the data span')
 
     df, n_arch, logL = observation(
-        df, train_mask, lcfg.obs_model, lcfg.obs_temperature,
+        df, lcfg.obs_model, lcfg.obs_temperature,
         lcfg.prob_resolution, lcfg.prob_floor, lcfg.calibration_path)
     tr_arch = None if n_arch is None else n_arch[train_mask]
     d_train = cells.pack(cells.deflate(df.filter(pl.Series(train_mask)), lcfg.rho),

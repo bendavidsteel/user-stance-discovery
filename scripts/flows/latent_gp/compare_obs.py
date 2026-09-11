@@ -71,7 +71,7 @@ def main():
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('path')
-    ap.add_argument('--obs-models', default='hard,soft,mixture')
+    ap.add_argument('--obs-models', default='hard,soft,channel')
     ap.add_argument('--n-dims', type=int, default=6)
     ap.add_argument('--n-fast', type=int, default=1)
     ap.add_argument('--fast-tau', type=float, default=80.0)
@@ -81,7 +81,7 @@ def main():
     ap.add_argument('--horizon-days', type=float, default=90.0)
     ap.add_argument('--calibration', default='')
     ap.add_argument('--temperature', type=float, default=1.0,
-                    help='read by soft and mixture only')
+                    help='read by soft only')
     args = ap.parse_args()
 
     spec = splits.SplitSpec(holdout_days=args.holdout_days)

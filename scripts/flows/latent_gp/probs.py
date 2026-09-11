@@ -1,22 +1,16 @@
 """Classifier probabilities as soft evidence for the cell likelihood.
 
 The classifier emits a posterior over three classes per post-target pair, not a
-label. Three ways to use it, in increasing fidelity:
+label. Two ways to use it:
 
   hard      the argmax, i.e. the integer counts the model started with
   soft      expected counts, sum_i q_ik -- but an ambiguous post then counts as
             evidence for the middle category, which is not what it is
-  mixture   log sum_k (q_ik / pi_k) P(k | f) per post, so a post that says
-            nothing contributes a constant, and hence contributes nothing
 
-`mixture` is the likelihood implied by conditioning on the post text rather
-than on a label: q_ik / pi_k is p(text | k) / p(text), which leaves the ordered
-probit as the only prior over classes. All three agree when the classifier is
-confident, so they can be compared on the same aggregate.
-
-Unlike the three-count forms, the mixture does not reduce to a fixed-size
-sufficient statistic, so posts are binned onto a lattice over the simplex and a
-cell carries one count per lattice point.
+Both agree when the classifier is confident, so they can be compared on the
+same aggregate. Getting the expected counts at a temperature needs the
+probabilities and not just their argmax, so posts are binned onto a lattice
+over the simplex and a cell carries one count per lattice point.
 """
 
 import numpy as np
@@ -47,8 +41,8 @@ def simplex_grid(resolution):
     """Lattice points on the 2-simplex at spacing 1/resolution, in a fixed order.
 
     Use a resolution divisible by 3, or the uniform distribution is not a
-    lattice point and the posts carrying no information -- the ones the mixture
-    form exists to handle -- get snapped to a point that leans somewhere.
+    lattice point and the posts carrying no information get snapped to a point
+    that leans somewhere.
     """
     r = int(resolution)
     pts = [(a, b, r - a - b) for a in range(r + 1) for b in range(r + 1 - a)]
@@ -85,20 +79,3 @@ def archetypes(resolution, temperature=1.0, floor=0.01):
     q = temper(simplex_grid(resolution), temperature)[:, TO_ORDINAL]
     return (1.0 - floor) * q + floor / 3.0
 
-
-def log_likelihood_ratio(q_arch, pi):
-    """log(q / pi): the log of p(text | k) / p(text), up to a constant.
-
-    Dividing out the classifier's own marginal leaves the ordered probit as the
-    only prior over classes, so the per-target intercept keeps meaning what it
-    meant under hard labels.
-    """
-    pi = np.asarray(pi, dtype=np.float64)
-    pi = pi / pi.sum()
-    return np.log(np.maximum(q_arch, 1e-300)) - np.log(np.maximum(pi, 1e-300))
-
-
-def marginal(n_neg, n_neu, n_pos):
-    """The classifier's implied class marginal, from the soft counts."""
-    tot = np.array([np.sum(n_neg), np.sum(n_neu), np.sum(n_pos)], dtype=np.float64)
-    return tot / tot.sum()

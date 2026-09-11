@@ -77,23 +77,23 @@ parameters:
 
   # --- stance observation model ---
   # How much of the classifier's output the latent fit sees. On the GPFA's own
-  # held-out blocks, a drifting prior beats a frozen latent only under
-  # 'mixture'; under 'hard' and 'soft' the frozen latent wins, so the drift the
-  # landscape model exists to predict may not be identifiable from labels at
-  # all. Swept here so the held-out objective decides, but note a bayes sweep
-  # cannot give clean marginals: settle it with a paired rerun of the winning
-  # configuration under each value, everything else fixed.
+  # held-out blocks a frozen latent beats a drifting prior under every value
+  # offered here, so the drift the landscape model exists to predict may not be
+  # identifiable from labels at all. Swept here so the held-out objective
+  # decides, but note a bayes sweep cannot give clean marginals: settle it with
+  # a paired rerun of the winning configuration under each value, everything
+  # else fixed.
   #
   # 'channel' reads the finetune's own 16,972-example test confusion matrix,
   # written beside the checkpoint; latent_gp.calibrate turns it into the file
   # below. It needs three lattice points rather than 28, so it is much the
   # cheapest of the three that model classifier error.
   latents.obs_model:
-    values: [hard, channel, soft, mixture]
+    values: [hard, channel, soft]
   latents.calibration_path:
     value: tmp/stance_calibration.json
-  # Temperature is only read by soft and mixture, and the cache key knows that,
-  # so hard and channel trials still share a latent fit across its values.
+  # Temperature is only read by soft, and the cache key knows that, so hard and
+  # channel trials still share a latent fit across its values.
   #
   # A calibrated classifier's mean confidence equals its accuracy. On the corpus
   # the mean is 0.776 against the test split's 0.740 accuracy, so the classifier
@@ -102,8 +102,8 @@ parameters:
   # before the hardest benchmark takes over.
   #
   # Discrete, like the other GPFA parameters and for the same reason: drawn from
-  # a continuous range every soft or mixture trial is its own cache key and pays
-  # for a full latent fit, and at this scale that is most of the trial budget.
+  # a continuous range every soft trial is its own cache key and pays for a
+  # full latent fit, and at this scale that is most of the trial budget.
   #
   # The range extends past what calibration implies because the data asked it
   # to: across 42 trials every one of the top ten sat at 1.8, which was the

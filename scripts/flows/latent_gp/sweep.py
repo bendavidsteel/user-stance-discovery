@@ -68,7 +68,7 @@ def main():
     ev_fc, ev_in = cells.eval_set(df.filter(fc)), cells.eval_set(df.filter(inte))
 
     obs_df, n_arch, logL = latents.observation(
-        df, train_mask, args.obs_model, args.temperature, args.resolution,
+        df, args.obs_model, args.temperature, args.resolution,
         calibration_path=args.calibration)
     tr = cells.deflate(obs_df.filter(train_mask), args.rho)
     d = cells.pack(tr, meta, None if n_arch is None else n_arch[train_mask])

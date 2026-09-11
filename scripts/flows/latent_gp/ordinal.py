@@ -7,9 +7,9 @@ the same size as the Gaussian sufficient statistics. Thresholds are symmetric
 global scale by W.
 
 That count likelihood is log-concave in f, so its site precision is always
-positive. The mixture form at the bottom of the file, which consumes the
-classifier's per-post probabilities instead of its labels, is not, and relies
-on the precision floor.
+positive. The mixture form at the bottom of the file, which reads a
+log-likelihood ratio per lattice point instead of a bare label, is not, and
+relies on the precision floor.
 """
 
 import numpy as np
@@ -135,9 +135,9 @@ def init_threshold(n_neg, n_neu, n_pos):
 
 # ------------------------------------------------ soft evidence (mixture form)
 #
-# With per-post classifier probabilities the cell no longer reduces to three
-# counts, so posts are binned onto a lattice over the simplex and the cell
-# carries one count per lattice point l with log-likelihood-ratio row logL[l].
+# Once a label is evidence about a class rather than the class itself, the cell
+# no longer reduces to three counts: it carries one count per lattice point l
+# over the simplex, with log-likelihood-ratio row logL[l].
 #
 # log p(cell | f) = sum_l n_l * log sum_k exp(logL[l,k]) P(k | f)
 #

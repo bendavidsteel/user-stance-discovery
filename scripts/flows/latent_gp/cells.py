@@ -5,10 +5,10 @@ determined exactly by (n, s_sum, s2_sum) -- under hard labels as integers, and
 under the classifier's probabilities as expected counts, since the same three
 moments carry either. So switching between them never rebuilds the aggregate.
 
-The mixture likelihood needs more than three counts, and takes it from the
-`q<i>` columns: the count of posts falling on lattice point i of the simplex
-(see probs.py). They are optional, and absent for an aggregate built from
-labels alone.
+Expected counts at a temperature need the probabilities themselves, and take
+them from the `q<i>` columns: the count of posts falling on lattice point i of
+the simplex (see probs.py). They are optional, and absent for an aggregate
+built from labels alone.
 """
 
 import datetime
@@ -223,7 +223,7 @@ def pack(df, meta, n_arch=None):
     }
     if n_arch is not None:
         # left on the host: the site computation only ever reads a chunk at a
-        # time, and the whole matrix is the largest array in a mixture fit
+        # time
         out['n_arch'] = np.asarray(n_arch) * scale[:, None]
     return out
 
