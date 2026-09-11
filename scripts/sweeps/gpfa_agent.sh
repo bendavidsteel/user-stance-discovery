@@ -23,12 +23,12 @@ set -euo pipefail
 COUNT="${COUNT:-1}"
 
 module load python/3.11.5
-source "$HOME/venvs/gpfa/bin/activate"
+source "$HOME/scratch/gpfa/venv/bin/activate"
 cd "$HOME/scratch/gpfa"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export POLARS_MAX_THREADS=6
-export PATH="$HOME/venvs/gpfa/bin:$PATH"     # the agent runs `python` via env
+export PATH="$HOME/scratch/gpfa/venv/bin:$PATH"     # the agent runs `python` via env
 
 echo "=== $(date '+%F %T') node $(hostname) sweep $SWEEP count $COUNT ==="
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader

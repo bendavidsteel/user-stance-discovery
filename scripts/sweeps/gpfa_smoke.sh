@@ -10,7 +10,7 @@
 
 set -euo pipefail
 module load python/3.11.5
-source "$HOME/venvs/gpfa/bin/activate"
+source "$HOME/scratch/gpfa/venv/bin/activate"
 cd "$HOME/scratch/gpfa"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
