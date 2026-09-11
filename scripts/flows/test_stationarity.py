@@ -544,3 +544,30 @@ def test_real_motion_is_never_called_frozen():
     Z = rng.normal(scale=1.27, size=(1, 60)) + ar1_panel(94, 60, phi=0.8, seed=42) * 0.6
     assert not st.panel_unit_root(Z, n_boot=19, log=quiet)['degenerate']
     assert not st.panel_kpss(Z, n_boot=19, log=quiet)['degenerate']
+
+
+def test_window_drift_reports_a_signed_contraction():
+    """A shrinking variance must not reach the prose as growth: the macros the
+    paper cites carry the sign, not the magnitude."""
+    T, M = 120, 30
+    rng = np.random.default_rng(50)
+    # variance contracts and the mean falls, the shape the real data shows
+    Z = (rng.normal(size=(T, M)) * np.linspace(1.0, 0.6, T)[:, None]
+         - np.linspace(0, 1.0, T)[:, None])[:, :, None]
+    p = st.Panel(Z=Z, SD=np.full_like(Z, 0.1),
+                 times=(np.datetime64('2022-01-01')
+                        + np.arange(T) * np.timedelta64(16, 'D')),
+                 seeds=[str(i) for i in range(M)], dt_days=16.0)
+    r = st.window_drift(p, n_windows=6, log=lambda *a, **k: None)
+    assert r['max_d'] < 0 and r['max_var_rel'] < 0
+    assert r['max_abs_d'] == pytest.approx(abs(r['max_d']))
+    assert r['max_abs_var_rel'] == pytest.approx(abs(r['max_var_rel']))
+
+
+def test_macros_carry_the_sign_of_the_drift(analysed, tmp_path):
+    _, macros = st.write_tex(analysed, cfg=None, out_dir=str(tmp_path))
+    text = dict(l.strip().removeprefix('\\newcommand{\\').rstrip('}').split('}{')
+                for l in open(macros) if l.strip())
+    w = analysed['window']
+    assert float(text['statMaxCohenD']) == pytest.approx(w['max_d'], abs=5e-4)
+    assert text['statMaxVarPct'][0] in '+-'

@@ -559,6 +559,10 @@ def window_drift(panel, n_windows=6, log=print):
             'var_change_rel': var_rel, 'cohens_d': d,
             'max_abs_d': float(np.max(np.abs(d))),
             'max_abs_var_rel': float(np.max(np.abs(var_rel))),
+            # signed, for the prose: the drift's direction is the whole point,
+            # and an absolute value silently turns a contraction into a growth
+            'max_d': float(d[np.argmax(np.abs(d))]),
+            'max_var_rel': float(var_rel[np.argmax(np.abs(var_rel))]),
             'n_windows': n_windows}
 
 
@@ -756,10 +760,10 @@ def write_tex(results, cfg, out_dir=None):
          f"($p \\leq {_fmt(p['fast_kpss']['p_value'])}$)",
          'reject stationarity' if p['fast_kpss']['rejects_stationarity'] else 'consistent'),
         ('Window mean drift', 'fast',
-         f"max $|d| = {_fmt(results['window']['max_abs_d'])}$",
+         f"$d = {_fmt(results['window']['max_d'])}$",
          f"vs {_fmt(results['window_unbalanced']['max_abs_d'])} unbalanced"),
         ('Window variance drift', 'fast',
-         f"max ${_fmt(100 * results['window']['max_abs_var_rel'], 1)}\\%$", ''),
+         f"${100 * results['window']['max_var_rel']:+.1f}\\%$", ''),
         ('Ensemble spread', 'fast',
          f"{_fmt(results['spread']['spread_ratio'], 2)}$\\times$",
          'dispersing' if results['spread']['dispersing'] else 'constant'),
@@ -796,8 +800,8 @@ def write_tex(results, cfg, out_dir=None):
     with open(macros, 'w') as f:
         for name, val in [
             ('statWindows', results['window']['n_windows']),
-            ('statMaxCohenD', _fmt(results['window']['max_abs_d'])),
-            ('statMaxVarPct', f"{100 * results['window']['max_abs_var_rel']:.0f}"),
+            ('statMaxCohenD', _fmt(results['window']['max_d'])),
+            ('statMaxVarPct', f"{100 * results['window']['max_var_rel']:+.0f}"),
             ('statUnbalCohenD', _fmt(results['window_unbalanced']['max_abs_d'])),
             ('statCIPS', _fmt(p['fast']['cips'])),
             ('statCIPSp', _fmt(p['fast']['p_value'])),
