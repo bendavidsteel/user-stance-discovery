@@ -187,15 +187,22 @@ def load_dimension_labels(dimension_labels_path):
         return json.load(f)
 
 
-def setup_x_axis_labels(ax, components, feature_names, dim_1=0):
-    """Setup axis labels with PCA feature information and optional dimension descriptions"""
-    top_features = get_top_component_features(components, feature_names, n_features=3)
+def setup_x_axis_labels(ax, components, feature_names, dim_1=0, weights=None):
+    """Setup axis labels with PCA feature information and optional dimension descriptions
+
+    `weights` is latents.rank_by_volume's, so an axis is named by the same
+    targets the dimension table lists rather than by whichever loading the fit
+    left largest.
+    """
+    top_features = get_top_component_features(components, feature_names,
+                                              n_features=3, weights=weights)
     x_label = format_pca_axis_label(dim_1 + 1, top_features[f'PC{dim_1 + 1}'])
     ax.set_xlabel(x_label, fontsize=8)
 
-def setup_y_axis_labels(ax, components, feature_names, dim_2=1):
+def setup_y_axis_labels(ax, components, feature_names, dim_2=1, weights=None):
     """Setup axis labels with PCA feature information and optional dimension descriptions"""
-    top_features = get_top_component_features(components, feature_names, n_features=3)
+    top_features = get_top_component_features(components, feature_names,
+                                              n_features=3, weights=weights)
     y_label = format_pca_axis_label(dim_2 + 1, top_features[f'PC{dim_2 + 1}'])
     ax.set_ylabel(y_label, fontsize=8)
     
@@ -432,6 +439,7 @@ def animate_density_streamplot(
         marginal_samples=None,
         n_marginal=256,
         n_dims=21,
+        target_weights=None,
     ):
     coord_col = f'coord_{n_dims}d'
     fig, ax = plt.subplots(1, 1, figsize=(12, 10))
@@ -468,8 +476,10 @@ def animate_density_streamplot(
 
 
     # Setup axis labels
-    setup_x_axis_labels(ax, components, feature_names, dim_1=0)
-    setup_y_axis_labels(ax, components, feature_names, dim_2=1)
+    setup_x_axis_labels(ax, components, feature_names, dim_1=0,
+                        weights=target_weights)
+    setup_y_axis_labels(ax, components, feature_names, dim_2=1,
+                        weights=target_weights)
 
     show_x_dim_labels(ax, dimension_labels, dim=0)
     show_y_dim_labels(ax, dimension_labels, dim=1)
@@ -495,8 +505,10 @@ def animate_density_streamplot(
             dim_1=0, dim_2=1, marginal_samples=marginal_samples, n_marginal=n_marginal)
 
         # Re-add axis labels and title
-        setup_x_axis_labels(ax, components, feature_names, dim_1=0)
-        setup_y_axis_labels(ax, components, feature_names, dim_2=1)
+        setup_x_axis_labels(ax, components, feature_names, dim_1=0,
+                        weights=target_weights)
+        setup_y_axis_labels(ax, components, feature_names, dim_2=1,
+                        weights=target_weights)
 
         show_x_dim_labels(ax, dimension_labels, dim=0)
         show_y_dim_labels(ax, dimension_labels, dim=1)
@@ -566,6 +578,7 @@ def plot_density_streamplot(
         hatch_patterns=None,
         show_kde=True,
         show_hatching=True,
+        target_weights=None,
         **kwargs
     ):
     coord_col = f'coord_{n_dims}d'
@@ -600,9 +613,11 @@ def plot_density_streamplot(
 
     # Setup axis labels (conditionally)
     if show_x_axis_labels:
-        setup_x_axis_labels(ax, components, feature_names, dim_1=dim_1)
+        setup_x_axis_labels(ax, components, feature_names, dim_1=dim_1,
+                            weights=target_weights)
     if show_y_axis_labels:
-        setup_y_axis_labels(ax, components, feature_names, dim_2=dim_2)
+        setup_y_axis_labels(ax, components, feature_names, dim_2=dim_2,
+                            weights=target_weights)
 
     if show_x_tick_labels:
         # Still set up tick labels without axis labels
@@ -640,6 +655,10 @@ def main(cfg):
     target_df = target_df.rename({latent_space.COORD: coord_col})
 
     assert len(stance_cols) == components.shape[1]
+    # the same ranking the dimension table uses, so a figure's axes are named
+    # by the targets that carry them rather than by the largest raw loading
+    target_weights = (latent_space.target_volumes(cfg, stance_cols)
+                      if cfg.latents.get('rank_by_volume', True) else None)
     coords = target_df[coord_col].to_numpy()
     x_range = (np.percentile(coords[:,0], 0.5), np.percentile(coords[:,0], 99.5))
     y_range = (np.percentile(coords[:,1], 0.5), np.percentile(coords[:,1], 99.5))
@@ -681,7 +700,11 @@ def main(cfg):
     marginal_samples = coords[:, :n_model_dims] if n_model_dims > 2 else None
 
     start_date = datetime.date(2022, 1, 1)
+    # the precomputed coords stored createtime as a Date, a gpfa latent stores
+    # it as a Datetime, and only one of those subtracts from a date
     end_date = target_df['createtime'].max()
+    if isinstance(end_date, datetime.datetime):
+        end_date = end_date.date()
     trange = ( (start_date - INITIAL_DATE.date()).days / UNIT_DAYS, (end_date - INITIAL_DATE.date()).days / UNIT_DAYS )
 
     plot_kwargs = {
@@ -698,6 +721,7 @@ def main(cfg):
         'marginal_samples': marginal_samples,
         'n_marginal': 256,
         'n_dims': cfg.n_dims,
+        'target_weights': target_weights,
     }
 
     PLATFORMS = ['twitter', 'tiktok', 'instagram', 'bluesky']
@@ -745,11 +769,14 @@ def main(cfg):
             plot_kwargs['max_flow'] = global_max
             plot_kwargs['min_flow'] = global_min
             plot_kwargs['show_legend'] = False
-            plot_kwargs['show_x_axis_labels'] = True
+            # one caption under the middle panel: the loading list is wide
+            # enough that three of them collide across the row
+            plot_kwargs['show_x_axis_labels'] = (i == len(years) // 2)
             plot_kwargs['show_y_axis_labels'] = (i == 0)
             plot_kwargs['show_x_tick_labels'] = True
             plot_kwargs['show_y_tick_labels'] = (i == 0)
-            plot_kwargs['show_kde'] = False
+            # the density is what changes between years; the flow barely does
+            plot_kwargs['show_kde'] = True
             plot_kwargs['show_hatching'] = False
             plot_density_streamplot(fig, axes[i], model, target_df, components, stance_cols, **plot_kwargs)
             axes[i].set_title(f'{t_to_datetime(t_range[0]).strftime("%Y")}')
@@ -891,9 +918,11 @@ def main(cfg):
                 alpha=0.1
             )
 
-        setup_x_axis_labels(ax, components, stance_cols, dim_1=0)
+        setup_x_axis_labels(ax, components, stance_cols, dim_1=0,
+                            weights=target_weights)
         show_x_dim_labels(ax, dimension_labels, dim=0)
-        setup_y_axis_labels(ax, components, stance_cols, dim_2=1)
+        setup_y_axis_labels(ax, components, stance_cols, dim_2=1,
+                            weights=target_weights)
         show_y_dim_labels(ax, dimension_labels, dim=1)
 
         x_range = (np.percentile(coords[:,0], 0.5), np.percentile(coords[:,0], 99.5))
