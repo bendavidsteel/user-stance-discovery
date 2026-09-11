@@ -326,7 +326,8 @@ def test_variogram_verdict_calls_sustained_growth_a_walk():
 
 # --- end to end ------------------------------------------------------------
 
-def synthetic_frame(T=140, M=24, n_fast=2, n_dims=4, dt_days=16.0, seed=30):
+def synthetic_frame(T=140, M=24, n_fast=2, n_dims=4, dt_days=16.0, seed=30,
+                    with_smoothed=False):
     """A latent frame shaped like `build_latents` output.
 
     Fast dims drift on a shared factor plus idiosyncratic AR(1) noise; slow
@@ -340,6 +341,16 @@ def synthetic_frame(T=140, M=24, n_fast=2, n_dims=4, dt_days=16.0, seed=30):
                         + np.stack([ar1_panel(T, M, phi=0.5, seed=seed + k)
                                     for k in range(n_fast)], axis=2) * 0.3)
     Z[:, :, n_fast:] = rng.normal(size=(1, M, n_dims - n_fast))
+    # The smoothed state of a const-prior dimension is exactly constant; the
+    # filtered state is a running estimate of that constant and still carries a
+    # decaying transient, which is the artefact `smoothed_col` exists to dodge.
+    S = Z.copy()
+    S[:, :, n_fast:] = Z[0, :, n_fast:][None, :, :]
+    if with_smoothed:
+        transient = np.exp(-np.arange(T) / (T / 3.0))[:, None, None]
+        Z = Z.copy()
+        Z[:, :, n_fast:] = S[:, :, n_fast:] + transient * rng.normal(
+            size=(1, M, n_dims - n_fast))
     t0 = datetime.datetime(2022, 1, 1)
     rows = []
     for m in range(M):
@@ -348,10 +359,12 @@ def synthetic_frame(T=140, M=24, n_fast=2, n_dims=4, dt_days=16.0, seed=30):
             rows.append({'createtime': t0 + datetime.timedelta(days=dt_days * t),
                          'filter_value': f'seed-{m:03d}',
                          'causal_4d': list(Z[t, m]),
+                         'coord_4d': list(S[t, m]),
                          'sd_4d': [0.2] * n_dims,
                          'n_posts': 20.0})
     return pl.DataFrame(rows, schema_overrides={
         'causal_4d': pl.Array(pl.Float64, n_dims),
+        'coord_4d': pl.Array(pl.Float64, n_dims),
         'sd_4d': pl.Array(pl.Float64, n_dims)})
 
 
@@ -410,6 +423,40 @@ def test_combine_dims_ignores_frozen_dimensions():
     got = st.combine_dims(mixed, 'rejects_unit_root', 'cips',
                           lambda v: float(np.mean(v)))
     assert got['n_live'] == 1 and got['rejects_unit_root']
+
+
+def test_control_is_frozen_only_on_the_smoothed_state():
+    """The bug the real data exposed.
+
+    A `slow_kind='const'` dimension is exactly constant only in the smoothed
+    state. Its filtered state is a running estimate of that constant, so the
+    control reads as moving and the test appears to detect non-stationarity
+    where by construction there is none.
+    """
+    quiet = lambda *a, **k: None
+    v = variogram.verdict(_rows([0.0, 0.4, 0.7, 0.9, 1.0, 1.0, 1.0, 1.0]),
+                          _rows([0.0] * 8))
+    df = synthetic_frame(with_smoothed=True)
+    kw = dict(n_boot=19, n_windows=4, min_bins=30, min_seeds=10, log=quiet)
+
+    on_filtered = st.analyse(df, 'causal_4d', 'sd_4d', 16.0, [0, 1], [2, 3], v, **kw)
+    assert not on_filtered['panel']['slow'].get('degenerate')   # the artefact
+
+    on_smoothed = st.analyse(df, 'causal_4d', 'sd_4d', 16.0, [0, 1], [2, 3], v,
+                             smoothed_col='coord_4d', **kw)
+    assert on_smoothed['panel']['slow']['degenerate']           # control restored
+    assert on_smoothed['panel']['slow']['n_live'] == 0
+
+
+def test_fast_block_is_reported_on_both_states():
+    quiet = lambda *a, **k: None
+    v = variogram.verdict(_rows([0.0, 0.4, 0.7, 0.9, 1.0, 1.0, 1.0, 1.0]),
+                          _rows([0.0] * 8))
+    got = st.analyse(synthetic_frame(with_smoothed=True), 'causal_4d', 'sd_4d',
+                     16.0, [0, 1], [2, 3], v, smoothed_col='coord_4d',
+                     n_boot=19, n_windows=4, min_bins=30, min_seeds=10, log=quiet)
+    assert got['panel']['fast_smoothed']['n_live'] == 2
+    assert not got['panel']['fast_smoothed'].get('degenerate')
 
 
 def test_analyse_separates_balanced_from_unbalanced_drift(analysed):

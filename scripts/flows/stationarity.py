@@ -618,10 +618,13 @@ def common_break(panel, dims, log=print):
 def load_latents(cfg, spec, log=print):
     """Filtered latent state on the fit's native bin grid.
 
-    Two deliberate departures from what the landscape model loads. The state is
-    `causal_*`, the filtered state, because the smoothed state at t is a
-    function of observations after t and a unit root test reads that as
-    persistence -- the same reason `latent_gp.compare_obs` reports both. And
+    Both states are returned. The tests read the filtered `causal_*`, because
+    the smoothed state at t is a function of observations after t and a unit
+    root test reads that as persistence -- the same reason
+    `latent_gp.compare_obs` reports both. The smoothed state comes along
+    because it is the only one on which the frozen slow block is a valid
+    control: see `analyse`.
+
     `interp_days` is forced to zero: the exported grid is linear interpolation
     between bin centres, so seven of every eight rows carry no new information
     and their autocorrelation belongs to the resampler.
@@ -636,14 +639,14 @@ def load_latents(cfg, spec, log=print):
     seed_split = splits.seed_split(gp_cells.seed_names(lcfg.cells_path), spec)
     df = build_latents(lcfg, spec, seed_split, cache_dir=cfg.latents.cache_dir,
                        log=log)
-    _, causal, sd = coord_cols(cfg.n_dims)
+    smoothed, causal, sd = coord_cols(cfg.n_dims)
     if cfg.platform != 'all':
         df = df.filter(pl.col('filter_value').cast(pl.String)
                        .str.to_lowercase().str.contains(f'-{cfg.platform}-'))
     df = df.filter(pl.col('filter_value') != '') \
-           .select(['createtime', 'filter_value', causal, sd]) \
+           .select(['createtime', 'filter_value', causal, smoothed, sd]) \
            .sort(['filter_value', 'createtime'])
-    return df, causal, sd, 2.0 * lcfg.bin_factor
+    return df, causal, smoothed, sd, 2.0 * lcfg.bin_factor
 
 
 def run_variogram(cfg, log=print):
@@ -738,10 +741,15 @@ def write_tex(results, cfg, out_dir='./out'):
          '; '.join(f"dim {b['dim']}: {b['break_date']}"
                    for b in results['breaks'] if b['rejects']) or 'no break',
          ''),
+        ('CIPS panel unit root', 'fast, smoothed state',
+         f"${_fmt(p['fast_smoothed']['cips'])}$ "
+         f"($p \\leq {_fmt(p['fast_smoothed']['p_value'])}$)"
+         if p.get('fast_smoothed') else '--',
+         'sensitivity to the state'),
         ('CIPS panel unit root', 'slow (control)',
          'no variation' if p['slow'].get('degenerate')
          else f"${_fmt(p['slow']['cips'])}$ ($p = {_fmt(p['slow']['p_value'])}$)",
-         f"frozen ({cfg_get(cfg, 'latents.slow_kind', 'const')})"),
+         f"frozen ({cfg_get(cfg, 'latents.slow_kind', 'const')}), smoothed state"),
     ]
     path = os.path.join(out_dir, 'stationarity.tex')
     with open(path, 'w') as f:
@@ -805,6 +813,15 @@ def summarise(results, log=print):
         f"{'yes' if p['fast_kpss']['rejects_stationarity'] else 'no'} "
         f"({p['fast_kpss']['n_reject']}/{p['fast_kpss']['n_live']} dims, "
         f"weakest p = {_fmt(p['fast_kpss']['p_value'])})")
+    sm = p.get('fast_smoothed')
+    if sm is not None:
+        log(f"    same on the smoothed state:         "
+            f"{'yes' if sm['rejects_unit_root'] else 'no'} "
+            f"({sm['n_reject']}/{sm['n_live']} dims) -- the state choice "
+            f"{'does not change' if sm['rejects_unit_root'] == p['fast']['rejects_unit_root'] else 'CHANGES'} the verdict")
+    ctl = p.get('slow')
+    log(f"  control, frozen slow block:            "
+        f"{'reports frozen, as it must' if ctl.get('degenerate') else 'REPORTS MOTION -- the test is measuring itself'}")
     breaks = [b for b in results['breaks'] if b['rejects']]
     log(f"  structural break in the common factor: "
         f"{'yes -- ' + ', '.join(b['break_date'] for b in breaks) if breaks else 'no'}")
@@ -840,17 +857,36 @@ def summarise(results, log=print):
 
 
 def analyse(df, state_col, sd_col, dt_days, fast, slow, variogram_result,
-            n_boot=199, n_windows=6, min_bins=30, min_seeds=10, log=print):
+            smoothed_col=None, n_boot=199, n_windows=6, min_bins=30,
+            min_seeds=10, log=print):
     """Every test, over an already-loaded latent frame.
 
     Split out from `main` so the whole chain -- including the summary and the
     table, whose key names are otherwise only exercised at the end of a fit
     that takes an hour -- runs on a synthetic frame in the test suite.
+
+    `smoothed_col` is what makes the slow block a control. Under
+    `slow_kind='const'` the *smoothed* slow state is exactly constant in time,
+    so a test that finds it moving is measuring itself. The *filtered* slow
+    state is not constant: it is a running estimate of a constant, and it
+    converges over the whole record rather than a burn-in, so on the filtered
+    state the control reports motion that is entirely the filter. The fast
+    block is unaffected -- its filtered-to-smoothed gap is flat in time, not a
+    decaying transient -- but it is reported on both states anyway, since the
+    choice is exactly the kind a reviewer asks about.
     """
     log('\n--- Balanced panel ---')
     panel = balanced_panel(df, state_col, sd_col, len(fast) + len(slow), dt_days,
                            min_bins=min_bins, min_seeds=min_seeds, log=log)
-    fast_panel, slow_panel = panel.block(fast), panel.block(slow)
+    fast_panel = panel.block(fast)
+    if smoothed_col is None:
+        smooth_panel = panel
+    else:
+        smooth_panel = balanced_panel(df, smoothed_col, sd_col,
+                                      len(fast) + len(slow), dt_days,
+                                      min_bins=min_bins, min_seeds=min_seeds,
+                                      log=lambda *a, **k: None)
+    slow_panel = smooth_panel.block(slow)
 
     results = {'blocks': {'fast': fast, 'slow': slow},
                'dt_days': dt_days,
@@ -865,7 +901,8 @@ def analyse(df, state_col, sd_col, dt_days, fast, slow, variogram_result,
 
     log('\n=== 3-4. Panel unit root and stationarity tests ===')
     panel_res = {}
-    for name, blk in (('fast', fast_panel), ('slow', slow_panel)):
+    for name, blk in (('fast', fast_panel), ('slow', slow_panel),
+                      ('fast_smoothed', smooth_panel.block(fast))):
         log(f"  [{name} block]")
         # one dimension at a time; CIPS is defined per series, not per vector
         roots = [panel_unit_root(blk.Z[:, :, k], n_boot=n_boot, log=log)
@@ -921,10 +958,11 @@ def main(cfg):
     variogram_result = run_variogram(cfg, log=print)
 
     print('\n--- Loading latents (filtered state, native grid) ---')
-    df, state_col, sd_col, dt_days = load_latents(cfg, spec, log=print)
+    df, state_col, smoothed_col, sd_col, dt_days = load_latents(cfg, spec, log=print)
     df = drop_prior_dominated(df, sd_col, fast, cfg.get('max_posterior_sd', 0.8))
 
     results = analyse(df, state_col, sd_col, dt_days, fast, slow, variogram_result,
+                      smoothed_col=smoothed_col,
                       n_boot=cfg.get('stationarity_boot', 199),
                       n_windows=cfg.get('stationarity_windows', 6))
     write_tex(results, cfg)
