@@ -1,0 +1,185 @@
+# Sweep for Fir, where a job is two hours on one H100.
+#
+# Same search as joint.yaml, restricted to the configurations that finish well
+# inside a two-hour allocation. The restriction is not a compromise about what
+# is worth exploring: runtime on these trials is driven entirely by the
+# structural settings, and every continuous parameter is flat against it
+# (|r| < 0.17 over 44 trials). Dropping the expensive end of four discrete axes
+# therefore buys a large speedup at a known cost in coverage, and prometheus
+# keeps the expensive end.
+#
+# Measured means from that sweep, which is where the cuts come from:
+#   phi_hidden_dims  [64,64,64] 0.75h   [128x4] 1.32h   [256,256,256] 1.83h
+#   obs_model        hard 0.90h   channel 1.14h   soft 1.04h   mixture 1.79h
+#   batch_size       1024 0.79h   512 1.21h   256 1.63h
+#   bin_factor       8 0.85h   4 1.48h   2 1.57h
+#
+# bin_factor is the cut that costs least: every one of the ten best trials used
+# 8, the largest value the old grid offered, so the winning region is already
+# the cheap one on that axis.
+#
+#   wandb sweep --project potential_landscape_training scripts/sweeps/fir.yaml
+#   sbatch --export=SWEEP=<entity/project/id>,COUNT=1 gpfa_agent.sh
+#
+# The per-trial timeout sits below the two-hour wall so a slow trial is killed
+# inside the job, by the job, rather than by SLURM mid-step: a trial SIGKILLed
+# by the scheduler is charged to the allocation and recorded as crashed.
+
+program: scripts/flows/nn_potential.py
+method: bayes
+metric:
+  name: objective
+  goal: maximize
+
+# Without this the search never ends: five parameters are continuous, so the
+# space cannot be exhausted the way a grid can. How long 200 takes here depends
+# on the queue rather than the trials.
+run_cap: 200
+
+command:
+  - ${env}
+  - timeout                     # a stalled trial must not block its agent
+  # The rebuilt aggregate has half again as many pairs, so an epoch now runs
+  # ~70s at batch_size 512 and about twice that at 256, and the latent fit
+  # costs 12-20 min depending on the grid. A hundred epochs at the small batch
+  # size therefore lands past 10800s, and a budget under the trial kills
+  # healthy trials rather than stalled ones -- which is what cost the first
+  # sweep two thirds of its yield. patience keeps the typical trial far inside
+  # this, so the slack is only ever paid by the trials that need it.
+  - "6300"
+  - python
+  - ${program}
+  - ${args_no_hyphens}
+
+parameters:
+  # --- fixed for every trial ---
+  # Only the objective horizon is scored: integrating the SDE over 90 days
+  # costs about ten times a single step, so extra horizons are for final runs.
+  # num_epochs also sets the learning-rate decay horizon, so this is a change
+  # to the optimisation and not only a cap; trials from earlier sweeps, which
+  # decayed over 400 epochs, are not comparable. Every trial that finished
+  # early-stopped well inside 100.
+  num_epochs:
+    value: 100
+  patience:
+    value: 10
+  eval_horizons:
+    value: "[90]"
+  breakdown_scenario:
+    value: "null"
+
+
+  # --- stance observation model ---
+  # How much of the classifier's output the latent fit sees. On the GPFA's own
+  # held-out blocks, a drifting prior beats a frozen latent only under
+  # 'mixture'; under 'hard' and 'soft' the frozen latent wins, so the drift the
+  # landscape model exists to predict may not be identifiable from labels at
+  # all. Swept here so the held-out objective decides, but note a bayes sweep
+  # cannot give clean marginals: settle it with a paired rerun of the winning
+  # configuration under each value, everything else fixed.
+  #
+  # 'channel' reads the finetune's own 16,972-example test confusion matrix,
+  # written beside the checkpoint; latent_gp.calibrate turns it into the file
+  # below. It needs three lattice points rather than 28, so it is much the
+  # cheapest of the three that model classifier error.
+  # mixture is out: the most expensive of the four and the weakest so far
+  # (mean 0.0220, best 0.0466 against channel's 0.1172). prometheus still runs it.
+  latents.obs_model:
+    values: [hard, channel, soft]
+  latents.calibration_path:
+    value: tmp/stance_calibration.json
+  # Temperature is only read by soft and mixture, and the cache key knows that,
+  # so hard and channel trials still share a latent fit across its values.
+  #
+  # A calibrated classifier's mean confidence equals its accuracy. On the corpus
+  # the mean is 0.776 against the test split's 0.740 accuracy, so the classifier
+  # is overconfident and only T > 1 is in play; matching the two implies T=1.33,
+  # and the per-benchmark accuracy spread (0.66 to 0.85) brackets it to 1.8ish
+  # before the hardest benchmark takes over.
+  #
+  # Discrete, like the other GPFA parameters and for the same reason: drawn from
+  # a continuous range every soft or mixture trial is its own cache key and pays
+  # for a full latent fit, and at this scale that is most of the trial budget.
+  #
+  # The range extends past what calibration implies because the data asked it
+  # to: across 42 trials every one of the top ten sat at 1.8, which was the
+  # largest value on offer, so the optimum was outside the grid rather than in
+  # it. 3.4 is the top of the bracket the per-benchmark accuracy spread allows.
+  latents.obs_temperature:
+    values: [1.0, 1.33, 1.8, 2.5, 3.4]
+
+  # --- latent-GP factor model ---
+  # fast_tau is the one axis that has settled inside its range: 20 took five of
+  # the top ten and 10, 40 and 80 all appear, so it is left alone.
+  #
+  # n_fast sits at its floor and cannot be widened -- n_fast=0 freezes the
+  # latent and takes rho to 0.03 -- so 4 fills the gap instead. Note that the
+  # pooled objective penalises small n_fast: predicted drift in a frozen
+  # direction lands in E|p|^2 and nowhere else, which cost about a third of rho
+  # at n_fast=1 on synthetic moments. ceiling_gain_per_dim is logged beside it
+  # and does not, so the two together say whether the preference is real.
+  #
+  # fast_kind decides whether a drifting dimension is confined. Both kinds are
+  # rough and their tau means the same thing, so the pair isolates confinement.
+  # On the GPFA's own held-out blocks a homogeneous OU at tau=80 took the best
+  # forecast RPS and log score of nine priors tried, beating the Wiener at every
+  # matched tau, so it is on the menu here rather than assumed.
+  #
+  # n_fast=6 is >= every n_dims offered, which is how a homogeneous mix is
+  # reached: the winning prior was homogeneous, and a per-dimension mix cannot
+  # express it.
+  n_dims:
+    values: [3, 4, 5, 6]
+  latents.n_fast:
+    values: [1, 2, 3, 4, 6]
+  latents.fast_kind:
+    values: [wiener, ou]
+  latents.fast_tau:
+    values: [10.0, 20.0, 40.0, 80.0]
+  # Confining the slow dimensions turned out to matter more than whether they
+  # drift at all: holding a 1fast+5slow mix fixed and changing only the slow
+  # kind, const -> wiener -> ou took forecast RPS 0.2830 -> 0.2822 -> 0.2734.
+  #
+  # slow_tau has to come with it. An OU reverts over 2*tau, so at 2560 alone it
+  # would not revert once inside the span of the data and the option would be a
+  # null test; 640 is where the gain above was measured.
+  latents.slow_kind:
+    values: [const, wiener, ou]
+  latents.slow_tau:
+    values: [640.0, 2560.0]
+  # 8 was the largest value on offer and won monotonically over 4 and 2, so 16
+  # is here to find out whether that trend continues or the objective is simply
+  # rewarding a coarser grid. Treat a win at 16 with suspicion: the grid spacing
+  # is 2 * bin_factor days, so at 16 it cannot resolve the short fast_tau values
+  # that the same trials prefer. 2 is dropped -- worst of the three and four
+  # times the cells of 8, so most of a budget for the least of the evidence.
+  latents.bin_factor:
+    values: [8, 16]
+
+  # --- landscape model ---
+  # sigma above ~0.7 and lr above ~0.02 drove the drift field to zero inside
+  # one epoch in the first sweep; both ranges stop short of that.
+  sigma:
+    distribution: log_uniform_values
+    min: 0.02
+    max: 0.4
+  confinement_factor:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-1
+  learning_rate:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-2
+  weight_decay:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-1
+  phi_layer_dropout:
+    distribution: uniform
+    min: 0.0
+    max: 0.2
+  phi_hidden_dims:
+    values: ["[64,64,64]", "[128,128,128,128]"]
+  batch_size:
+    values: [512, 1024]
