@@ -19,7 +19,7 @@
 # the cheap one on that axis.
 #
 #   wandb sweep --project potential_landscape_training scripts/sweeps/fir.yaml
-#   sbatch --export=SWEEP=<entity/project/id>,COUNT=1 gpfa_agent.sh
+#   sbatch --export=SWEEP=<entity/project/id>,COUNT=2 gpfa_agent.sh
 #
 # The per-trial timeout sits below the two-hour wall so a slow trial is killed
 # inside the job, by the job, rather than by SLURM mid-step: a trial SIGKILLed
@@ -39,14 +39,13 @@ run_cap: 200
 command:
   - ${env}
   - timeout                     # a stalled trial must not block its agent
-  # The rebuilt aggregate has half again as many pairs, so an epoch now runs
-  # ~70s at batch_size 512 and about twice that at 256, and the latent fit
-  # costs 12-20 min depending on the grid. A hundred epochs at the small batch
-  # size therefore lands past 10800s, and a budget under the trial kills
-  # healthy trials rather than stalled ones -- which is what cost the first
-  # sweep two thirds of its yield. patience keeps the typical trial far inside
-  # this, so the slack is only ever paid by the trials that need it.
-  - "6300"
+  # Two trials to a two-hour job, so this is half the wall less the startup
+  # and a margin: a trial SIGKILLed by SLURM is charged to the allocation and
+  # recorded as crashed, whereas one killed by this is only recorded. The H100
+  # turned the first measured trial over in 25 minutes, so the typical trial
+  # sits at half of it and the slack is only ever paid by the trials that
+  # need it.
+  - "3000"
   - python
   - ${program}
   - ${args_no_hyphens}
