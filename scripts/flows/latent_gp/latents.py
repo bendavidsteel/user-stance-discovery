@@ -242,48 +242,64 @@ def _loading_frame(meta, W, b, mu, sd):
     })
 
 
-def _cache_paths(lcfg, spec, cache_dir):
+LATENTS_FILE, LOADINGS_FILE = 'latents.parquet.zstd', 'loadings.parquet.zstd'
+
+
+def fit_dir(root, lcfg, spec):
+    """This fit's own directory under `root`, or None when there is no root.
+
+    A directory rather than a keyed filename so that whatever is derived from
+    the fit -- the landscape model above all -- is stored beside the frames it
+    was derived from. cells_path is in the key because lcfg.tag deliberately
+    omits it, so two aggregates would otherwise share a directory.
+    """
+    if not root:
+        return None
+    return os.path.join(
+        root, f'gpfa{lcfg.tag}_{data_tag(lcfg.cells_path)}_{spec.tag}')
+
+
+def _cache_paths(lcfg, spec, cache_root):
     """Where this configuration's latents and loadings live, or (None, None)."""
-    if not cache_dir:
+    d = fit_dir(cache_root, lcfg, spec)
+    if d is None:
         return None, None
-    key = f'{lcfg.tag}_{data_tag(lcfg.cells_path)}_{spec.tag}'
-    return (os.path.join(cache_dir, f'latents_{key}.parquet.zstd'),
-            os.path.join(cache_dir, f'loadings_{key}.parquet.zstd'))
+    return os.path.join(d, LATENTS_FILE), os.path.join(d, LOADINGS_FILE)
 
 
-def build_latents(lcfg, spec, seed_split, cache_dir=None, log=print):
+def build_latents(lcfg, spec, seed_split, cache_root=None, log=print):
     """Fit the latent-GP factor model under `spec` and return per-bin states.
 
     `seed_split` maps trajectory id -> 'train' / 'val' / 'test'. Returns a frame
     of (createtime, filter_value, coord, causal coord, posterior sd, n_posts).
     """
-    return _build(lcfg, spec, seed_split, cache_dir, log, LATENTS)
+    return _build(lcfg, spec, seed_split, cache_root, log, LATENTS)
 
 
-def build_loadings(lcfg, spec, seed_split, cache_dir=None, log=print):
+def build_loadings(lcfg, spec, seed_split, cache_root=None, log=print):
     """Per-target loadings from the same fit: (target, loading, intercept).
 
     One row per target surviving min_target_volume, in the order W was fitted
     in, so `loading_matrix` can hand the pair to code written against PCA
     components. Reported in the units build_latents reports, not the fit's.
     """
-    return _build(lcfg, spec, seed_split, cache_dir, log, LOADINGS)
+    return _build(lcfg, spec, seed_split, cache_root, log, LOADINGS)
 
 
-def _build(lcfg, spec, seed_split, cache_dir, log, want):
+def _build(lcfg, spec, seed_split, cache_root, log, want):
     """Whichever output was asked for, refitting only when that one is absent.
 
     Latents cached before the loadings existed are still valid on their own, so
     asking for them never refits for the sake of the sibling file.
     """
-    paths = _cache_paths(lcfg, spec, cache_dir)
+    paths = _cache_paths(lcfg, spec, cache_root)
     if paths[want] and os.path.exists(paths[want]):
         log(f'reusing cached {paths[want]}')
         return pl.read_parquet(paths[want])
 
     built = _fit(lcfg, spec, seed_split, log)
-    if cache_dir:
-        os.makedirs(cache_dir, exist_ok=True)
+    if cache_root:
+        os.makedirs(os.path.dirname(paths[0]), exist_ok=True)
         for path, frame in zip(paths, built):
             frame.write_parquet(path, compression='zstd')
     return built[want]

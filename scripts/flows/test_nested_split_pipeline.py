@@ -33,18 +33,20 @@ for name, attrs in (
 sys.modules['hydra'].main = lambda **kw: (lambda f: f)
 
 import splits                                    # noqa: E402
+import latent_space                              # noqa: E402
 import nn_potential as nnp                       # noqa: E402
 from latent_gp.test_latents import synth, M      # noqa: E402
 
 
-def make_cfg(cells_path, cache_dir):
+def make_cfg(cells_path, out_dir):
     return OmegaConf.create({
         'n_dims': 3, 'platform': 'all', 'min_target_volume': 0,
+        'out_dir': out_dir, 'sigma': 0.3, 'learning_rate': 1e-3,
         'rolling_mean_window': 292, 'trend_path': './data/trends',
         'split': {'holdout_days': 30, 'origin_offset_days': 0, 'train_frac': 0.70,
                   'val_frac': 0.10, 'seed': 42},
         'latents': {
-            'method': 'gpfa', 'cells_path': cells_path, 'cache_dir': cache_dir,
+            'method': 'gpfa', 'cells_path': cells_path,
             'bin_factor': 1, 'interp_days': 1.0, 'n_fast': 1, 'fast_tau': 20.0,
             'fast_kind': 'wiener', 'slow_kind': 'const', 'slow_tau': 2560.0,
             'rho': 0.0, 'iters': 8, 'infer_iters': 5, 'causal_state': False,
@@ -166,7 +168,7 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         cells = os.path.join(td, 'cells.parquet.zstd')
         synth(cells)
-        cfg = make_cfg(cells, os.path.join(td, 'cache'))
+        cfg = make_cfg(cells, os.path.join(td, 'out'))
         spec = splits.SplitSpec.from_cfg(cfg)
 
         target_df = nnp.load_latent_df(cfg, spec)
@@ -225,14 +227,24 @@ def main():
             assert len(cell) == len(want) and len(tr) == len(train), scenario
         print('apply_split nested branch matches direct scenario selection')
 
-        # run_dir must separate configurations that change what the model sees
+        # the landscape model must be written under the fit it was trained on
+        assert nnp.run_dir(cfg).startswith(latent_space.latent_dir(cfg) + os.sep)
+        assert os.path.exists(os.path.join(latent_space.latent_dir(cfg),
+                                           'latents.parquet.zstd'))
+
+        # run_dir must separate configurations that change what the model sees,
+        # landscape hyperparameters included -- trials sharing a fit used to
+        # share a directory and overwrite each other's checkpoints
         d1 = nnp.run_dir(cfg)
-        cfg.latents.n_fast = 2
+        cfg.sigma = 0.4
         d2 = nnp.run_dir(cfg)
-        cfg.split.holdout_days = 91
+        assert os.path.dirname(d1) == os.path.dirname(d2), (d1, d2)
+        cfg.latents.n_fast = 2
         d3 = nnp.run_dir(cfg)
-        assert len({d1, d2, d3}) == 3, (d1, d2, d3)
-        print('run_dir separates latent and split configurations')
+        cfg.split.holdout_days = 91
+        d4 = nnp.run_dir(cfg)
+        assert len({d1, d2, d3, d4}) == 4, (d1, d2, d3, d4)
+        print('run_dir separates latent, split and landscape configurations')
 
     print('displacement decomposition:')
     check_displacement_identity()

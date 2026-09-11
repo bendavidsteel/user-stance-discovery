@@ -175,11 +175,14 @@ def check_loadings(td, clean, spec, seed_split, lcfg_kw, W_true, b_true, z_true)
     cache = os.path.join(td, 'loading_cache')
     lcfg = LatentConfig(cells_path=clean, **lcfg_kw)
     seen = []
-    kw = dict(cache_dir=cache, log=lambda *a: seen.append(' '.join(map(str, a))))
+    kw = dict(cache_root=cache, log=lambda *a: seen.append(' '.join(map(str, a))))
 
     loadings = build_loadings(lcfg, spec, seed_split, **kw)
-    written = sorted(f.split('_')[0] for f in os.listdir(cache))
-    assert written == ['latents', 'loadings'], written
+    # one directory per fit, so the landscape models trained on it can sit
+    # inside rather than beside every other configuration's
+    fit, = os.listdir(cache)
+    assert sorted(os.listdir(os.path.join(cache, fit))) == \
+        ['latents.parquet.zstd', 'loadings.parquet.zstd'], fit
 
     # one fit serves both, so asking for the sibling must not refit
     seen.clear()

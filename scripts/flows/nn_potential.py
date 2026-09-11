@@ -1,4 +1,6 @@
 import datetime
+import hashlib
+import json
 import logging
 import os
 
@@ -206,8 +208,8 @@ def load_latent_df(cfg, spec):
 
     lcfg = LatentConfig.from_cfg(cfg)
     seed_split = splits.seed_split(gp_cells.seed_names(lcfg.cells_path), spec)
-    df = build_latents(lcfg, spec, seed_split, cache_dir=cfg.latents.cache_dir,
-                       log=logger.info)
+    df = build_latents(lcfg, spec, seed_split,
+                       cache_root=latent_space.latent_root(cfg), log=logger.info)
 
     coord, causal, _ = coord_cols(cfg.n_dims)
     state = causal if cfg.latents.causal_state else coord
@@ -220,18 +222,70 @@ def load_latent_df(cfg, spec):
         .rename({state: 'x0'})
 
 
+# Everything that changes the trained landscape. Eval-only settings are left
+# out so that re-scoring a model at a new horizon does not re-key its directory.
+LANDSCAPE_FIELDS = (
+    'platform', 'rolling_mean_window', 'batch_size', 'num_epochs', 'min_epochs',
+    'patience', 'train_fraction', 'sigma', 'confine', 'confinement_factor',
+    'dt', 'vbt_tol', 'dt_min', 'dt_max', 'solver', 'model_do_sample',
+    'phi_hidden_dims', 'phi_hidden_acts', 'phi_final_act',
+    'phi_layer_normalize', 'phi_layer_dropout', 'init_phi_weights_method',
+    'init_phi_weights_args', 'init_phi_bias_method', 'init_phi_bias_args',
+    'nepochs_warmup', 'nepochs_decay', 'optimizer', 'momentum', 'weight_decay',
+    'clip', 'lr_schedule', 'learning_rate', 'final_learning_rate',
+    'peak_learning_rate', 'warmup_cosine_decay_exponent', 'fix_noise',
+    'loss_fn_key', 'loss_fn_kernel', 'loss_fn_bw', 'cont_path',
+)
+
+
+def _normalise(v):
+    """Numbers to float, so hydra handing back 100 where the default is 100.0
+    does not key a second directory for the same configuration."""
+    if isinstance(v, bool) or v is None or isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, (list, tuple)):
+        return [_normalise(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _normalise(x) for k, x in sorted(v.items())}
+    return str(v)
+
+
+def landscape_tag(cfg):
+    """Key for the trained landscape, given the representation it sits on."""
+    vals = {k: cfg.get(k) for k in LANDSCAPE_FIELDS}
+    # not a LatentConfig field -- it picks which cached column the landscape is
+    # trained on, so it changes the model without changing the fit
+    vals['causal_state'] = cfg.latents.get('causal_state')
+    body = json.dumps(_normalise(omegaconf.OmegaConf.to_object(
+        omegaconf.OmegaConf.create(vals))), sort_keys=True)
+    return hashlib.blake2b(body.encode(), digest_size=6).hexdigest()
+
+
 def run_dir(cfg):
-    """Output directory, keyed by everything that changes what the model sees."""
-    trend_name = os.path.basename(cfg.trend_path.rstrip('/'))
-    parts = [f'dims_{"_".join(str(d) for d in range(cfg.n_dims))}']
-    if cfg.platform != 'all':
-        parts.append(cfg.platform)
-    if cfg.latents.method == 'gpfa':
-        parts.append(f'gpfa{LatentConfig.from_cfg(cfg).tag}')
-    elif cfg.rolling_mean_window != 100:
-        parts.append(f'rm{cfg.rolling_mean_window}')
-    parts.append(splits.SplitSpec.from_cfg(cfg).tag)
-    return os.path.join('.', 'out', trend_name, '_'.join(parts))
+    """Output directory for one trained landscape, under the fit it was trained on.
+
+    Nested rather than flat because a representation is shared by every trial
+    that only retunes the landscape, and a fit costs far more than a landscape.
+    """
+    return os.path.join(latent_space.latent_dir(cfg), landscape_tag(cfg))
+
+
+def write_run_record(cfg, dir_path, obj_key, objective):
+    """Name the wandb run that wrote this checkpoint, so a sweep result can be
+    traced back to a model without re-running the trial."""
+    record = {
+        'run_id': wandb.run.id,
+        'run_name': wandb.run.name,
+        'sweep_id': wandb.run.sweep_id,
+        'objective_key': obj_key,
+        'objective': objective,
+        'finished': datetime.datetime.now().isoformat(timespec='seconds'),
+        'config': omegaconf.OmegaConf.to_object(cfg),
+    }
+    with open(os.path.join(dir_path, 'run.json'), 'w') as fh:
+        json.dump(record, fh, indent=1, default=str)
 
 
 def compute_training_split(cfg, target_df=None):
@@ -828,6 +882,7 @@ def main(cfg):
         wandb.run.summary['objective'] = objective
         logger.info(f'objective ({obj_key}) = {objective:.5f}')
 
+    write_run_record(cfg, dir_path, obj_key, objective)
     wandb.finish()
 
 

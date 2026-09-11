@@ -19,10 +19,30 @@ import polars as pl
 
 import splits
 from latent_gp import (LatentConfig, build_latents, build_loadings, coord_cols,
-                       loading_matrix)
+                       fit_dir, loading_matrix)
 from latent_gp import cells as gp_cells
 
 logger = logging.getLogger(__name__)
+
+OUT_ROOT = './out'
+
+
+def latent_root(cfg):
+    """Everything a configuration produces lives under here, fit first."""
+    return os.path.join(cfg.get('out_dir', OUT_ROOT),
+                        os.path.basename(cfg.trend_path.rstrip('/')))
+
+
+def latent_dir(cfg):
+    """Where this configuration's representation is cached."""
+    root = latent_root(cfg)
+    if cfg.latents.method == 'gpfa':
+        return fit_dir(root, LatentConfig.from_cfg(cfg),
+                       splits.SplitSpec.from_cfg(cfg))
+    dims = '_'.join(str(d) for d in range(cfg.n_dims))
+    return os.path.join(root, f'dims_{dims}_rm{cfg.rolling_mean_window}_'
+                              f'{splits.SplitSpec.from_cfg(cfg).tag}')
+
 
 # One name whatever the dimensionality, so nothing downstream hard-codes it
 COORD = 'coord'
@@ -132,7 +152,7 @@ def dimension_quality(cfg, n_top=TOP_TARGETS):
     lcfg = LatentConfig.from_cfg(cfg)
     seed_split = splits.seed_split(gp_cells.seed_names(lcfg.cells_path), spec)
     components, targets = loading_matrix(build_loadings(
-        lcfg, spec, seed_split, cache_dir=cfg.latents.cache_dir, log=logger.info))
+        lcfg, spec, seed_split, cache_root=latent_root(cfg), log=logger.info))
     return ranking_quality(components, target_volumes(cfg, targets), n_top)
 
 
@@ -140,7 +160,7 @@ def _gpfa(cfg):
     spec = splits.SplitSpec.from_cfg(cfg)
     lcfg = LatentConfig.from_cfg(cfg)
     seed_split = splits.seed_split(gp_cells.seed_names(lcfg.cells_path), spec)
-    kw = dict(cache_dir=cfg.latents.cache_dir, log=logger.info)
+    kw = dict(cache_root=latent_root(cfg), log=logger.info)
 
     coord, causal, _ = coord_cols(lcfg.n_dims)
     state = causal if cfg.latents.causal_state else coord

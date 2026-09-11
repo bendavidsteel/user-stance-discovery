@@ -7,6 +7,11 @@ n_dims: 6
 num_epochs: 100
 patience: 10
 
+# Everything a run produces: the latent fit, and the landscape models trained
+# on it in a directory each. Derived from the config, so a configuration is
+# addressable without a record of where it was written.
+out_dir: './out'
+
 # Nested trajectory x time split. Trajectories are hashed into train/val/test;
 # a pair is out-of-time when its target t1 lands in the last holdout_days.
 # origin_offset_days > 0 moves the window back from the end of the data and
@@ -25,7 +30,6 @@ split:
 latents:
   method: gpfa
   cells_path: 'tmp/gpfa_cells_2022_onwards.parquet.zstd'
-  cache_dir: 'tmp/latents'
   bin_factor: 8                  # latent grid spacing = 2 * bin_factor days
   interp_days: 2.0               # resample onto this spacing; 0 keeps the bin grid
   n_fast: 2                      # dimensions with drifting dynamics; the rest are slow
