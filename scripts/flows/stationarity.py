@@ -232,6 +232,13 @@ def default_block(T):
     return max(2, int(round(T ** (1 / 3))))
 
 
+# A frozen dimension's smoothed state is constant only up to the smoother's
+# round-off, which grows with the problem: ~1e-7 of the cross-sectional spread
+# on the full fit against ~1e-15 on a tenth of it. So the floor is relative.
+# Real motion sits at ~0.5 of the cross-sectional spread, seven orders above.
+FROZEN_REL_TOL = 1e-4
+
+
 def _degenerate(Z, log, what):
     """A dimension the prior froze has no variation to test.
 
@@ -239,8 +246,14 @@ def _degenerate(Z, log, what):
     machinery over it yields nan and a warning rather than a result. Saying so
     is the point: it is the control that shows a live test can tell the
     difference.
+
+    Measured against the spread between trajectories, not against an absolute
+    floor: an absolute one is a threshold on round-off, and which side of it
+    the fit lands on is a fact about the fit's size, not about the data.
     """
-    live = float(np.mean(Z.std(axis=0) > 1e-9))
+    scale = float(Z.mean(axis=0).std())          # spread of the per-seed levels
+    floor = max(1e-12, FROZEN_REL_TOL * scale)
+    live = float(np.mean(Z.std(axis=0) > floor))
     if live >= 0.5:
         return None
     log(f"  {what}: {1 - live:.0%} of series are constant "
@@ -632,12 +645,13 @@ def load_latents(cfg, spec, log=print):
     Refitting under a changed `interp_days` keys a separate cache entry, so
     this does not disturb the landscape model's latents.
     """
+    import latent_space
     from latent_gp import LatentConfig, build_latents, coord_cols
     from latent_gp import cells as gp_cells
 
     lcfg = dataclasses.replace(LatentConfig.from_cfg(cfg), interp_days=0.0)
     seed_split = splits.seed_split(gp_cells.seed_names(lcfg.cells_path), spec)
-    df = build_latents(lcfg, spec, seed_split, cache_dir=cfg.latents.cache_dir,
+    df = build_latents(lcfg, spec, seed_split, cache_root=latent_space.latent_root(cfg),
                        log=log)
     smoothed, causal, sd = coord_cols(cfg.n_dims)
     if cfg.platform != 'all':

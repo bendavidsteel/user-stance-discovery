@@ -520,3 +520,27 @@ def test_drop_prior_dominated_raises_when_nothing_survives():
     df = _frame({'a': (0, 20), 'b': (0, 20)}, sd=0.95)
     with pytest.raises(ValueError, match='leaves no panel'):
         st.drop_prior_dominated(df, 'sd_2d', [0, 1], 0.8, log=lambda *a, **k: None)
+
+
+def test_frozen_block_survives_smoother_round_off():
+    """The full-data control failure: a `const` dimension is constant only up
+    to the smoother's round-off, which on the full fit reached ~1e-7 of the
+    cross-sectional spread — far above any absolute floor, and still frozen."""
+    quiet = lambda *a, **k: None
+    rng = np.random.default_rng(40)
+    levels = rng.normal(scale=1.27, size=(1, 60))        # real between-seed spread
+    for noise in (1e-15, 1e-9, 1e-7, 1e-5):
+        Z = levels + rng.normal(scale=noise, size=(94, 60))
+        got = st.panel_unit_root(Z, n_boot=19, log=quiet)
+        assert got['degenerate'], f'round-off {noise:g} read as motion'
+        assert st.panel_kpss(Z, n_boot=19, log=quiet)['degenerate']
+
+
+def test_real_motion_is_never_called_frozen():
+    """The other side of the same threshold: within-seed motion at the scale
+    the fast dims actually show (~0.5 of the cross-sectional spread)."""
+    quiet = lambda *a, **k: None
+    rng = np.random.default_rng(41)
+    Z = rng.normal(scale=1.27, size=(1, 60)) + ar1_panel(94, 60, phi=0.8, seed=42) * 0.6
+    assert not st.panel_unit_root(Z, n_boot=19, log=quiet)['degenerate']
+    assert not st.panel_kpss(Z, n_boot=19, log=quiet)['degenerate']
