@@ -112,6 +112,20 @@ def build_horizon_pairs(rolling_df, horizon_days, dims, tolerance_frac=0.25):
     return paired
 
 
+def rolling_frame(cfg, target_df, dims):
+    """The per-timestep frame `build_horizon_pairs` reads, smoothed if needed.
+
+    A gpfa latent is smooth in time by construction, so it only gets the
+    columns the pair builder indexes; a precomputed coord gets the rolling mean
+    first.
+    """
+    if cfg.latents.method != 'gpfa':
+        return compute_rolling_means(cfg, target_df, dims)
+    return target_df.with_columns(
+        [pl.col('x0').arr.get(i).alias(f'x0_{i}') for i in dims]
+        + [((pl.col('createtime') - INITIAL_DATE).dt.total_days() / UNIT_DAYS).alias('t')])
+
+
 def load_target_df(cfg):
     """Load coords and apply early filtering: platform + non-empty filter_value, sorted, renamed."""
     target_path = os.path.join(cfg.trend_path, f'{cfg.dim_reduction_method}_coords.parquet.zstd')
@@ -231,7 +245,7 @@ def compute_training_split(cfg, target_df=None):
     If target_df is None, rebuilds it from cfg via load_target_df + build_training_pairs.
     Pass an existing target_df (e.g. from training) to avoid redundant work.
     """
-    if cfg.split_type == 'random':
+    if cfg.split_type in ('random', 'nested'):
         return None, None
 
     if target_df is None:
@@ -664,10 +678,7 @@ def main(cfg):
 
     target_df = load_latent_df(cfg, spec)
     smooth = cfg.latents.method != 'gpfa'
-    rolling_df = compute_rolling_means(cfg, target_df, list(range(n_dims))) if smooth \
-        else target_df.with_columns([
-            pl.col('x0').arr.get(i).alias(f'x0_{i}') for i in range(n_dims)
-        ] + [((pl.col('createtime') - INITIAL_DATE).dt.total_days() / UNIT_DAYS).alias('t')])
+    rolling_df = rolling_frame(cfg, target_df, list(range(n_dims)))
 
     grid_days = cfg.latents.interp_days or 2 * cfg.latents.bin_factor
     pairs = build_training_pairs(
@@ -770,6 +781,12 @@ def main(cfg):
         reduce_dt_on_nan=True, reduce_cf_on_nan=True,
         logprint=logger.info, outdir=dir_path,
     )
+
+    # train_model returns the best epoch but only checkpoints improvements, so
+    # after an early stop the newest file on disk is the epoch that triggered
+    # it. Every downstream script loads the newest, so write the scored model
+    # last and they get the one these metrics describe.
+    model.save(os.path.join(dir_path, 'states', 'model_best.pth'), hyperparams)
 
     seed_df = load_seed_metadata(cfg)
     key, evalkey = jax.random.split(key)

@@ -18,7 +18,7 @@ from plnn.models import DeepTimePhiPLNN
 from plnn.pl.plot_plnn import compute_grad_phi
 
 import latent_space
-from nn_potential import INITIAL_DATE, UNIT_DAYS
+from nn_potential import INITIAL_DATE, UNIT_DAYS, run_dir
 from pca_density import create_kde_background, get_top_component_features, format_pca_axis_label
 
 
@@ -138,7 +138,7 @@ def t_to_datetime(t):
 
 def show_x_dim_labels(ax, dimension_labels, dim):
     # Get dimension 0 (x-axis) labels
-    dim0 = dimension_labels[str(dim)]['3_cat']
+    dim0 = dimension_labels.get(str(dim), {}).get('3_cat', {})
     x_tick_labels = []
     x_tick_positions = []
 
@@ -158,7 +158,7 @@ def show_x_dim_labels(ax, dimension_labels, dim):
 
 def show_y_dim_labels(ax, dimension_labels, dim):
     # Get dimension 1 (y-axis) labels
-    dim1 = dimension_labels[str(dim)]['3_cat']
+    dim1 = dimension_labels.get(str(dim), {}).get('3_cat', {})
     y_tick_labels = []
     y_tick_positions = []
 
@@ -177,7 +177,12 @@ def show_y_dim_labels(ax, dimension_labels, dim):
         ax.set_yticklabels(y_tick_labels, fontsize=8, rotation=15, ha='right')
 
 def load_dimension_labels(dimension_labels_path):
-    """Load dimension labels from JSON file created by pca_dimensions.py"""
+    """Labels from describe_dimensions.py, or none: a new representation has
+    none until it has been described, and the axes read fine without them."""
+    if not os.path.exists(dimension_labels_path):
+        print(f'no dimension labels at {dimension_labels_path}; '
+              'axes will show loadings only')
+        return {}
     with open(dimension_labels_path, 'r') as f:
         return json.load(f)
 
@@ -627,16 +632,15 @@ def get_most_recent_state(path):
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def main(cfg):
-    target_head_df = pl.read_parquet(os.path.join(cfg.trend_path, 'pivoted_and_imputed.parquet.zstd'), n_rows=1)
-    target_df = pl.read_parquet(os.path.join(cfg.trend_path, f'{cfg.dim_reduction_method}_coords.parquet.zstd'))
-    component_df = pl.read_parquet(os.path.join(cfg.trend_path, f'{cfg.dim_reduction_method}_metadata.parquet.zstd'))
-    stance_cols = [col for col in target_head_df.columns if col not in ['createtime', 'filter_value', f'coord_{cfg.n_dims}d']]
-   
-    components = np.stack(component_df.filter(pl.col('n_dims') == cfg.n_dims)['components'][0].to_numpy())
+    # Whatever cfg.latents.method says the model was trained on. The helpers
+    # below index the coordinate column by dimensionality, so it is renamed to
+    # the name they expect rather than threading a column name through them.
+    coord_col = f'coord_{cfg.n_dims}d'
+    target_df, components, stance_cols = latent_space.load(cfg)
+    target_df = target_df.rename({latent_space.COORD: coord_col})
 
     assert len(stance_cols) == components.shape[1]
-    target_df = target_df.select(['createtime', 'filter_value', f'coord_{cfg.n_dims}d'])
-    coords = target_df[f'coord_{cfg.n_dims}d'].to_numpy()
+    coords = target_df[coord_col].to_numpy()
     x_range = (np.percentile(coords[:,0], 0.5), np.percentile(coords[:,0], 99.5))
     y_range = (np.percentile(coords[:,1], 0.5), np.percentile(coords[:,1], 99.5))
 
@@ -659,15 +663,16 @@ def main(cfg):
     fig_path = f'./figs/{trend_name}'
     os.makedirs(fig_path, exist_ok=True)
 
+    # The platform panel needs one model per platform, trained separately.
     PLOT_ANI = False
     PLOT_TIME = True
     PLOT_PLATFORM = False
-    PLOT_TRAJECTORIES = False
+    PLOT_TRAJECTORIES = True
     PLOT_POTENTIAL_LANDSCAPES = False
-    PLOT_SINGLE = False
+    PLOT_SINGLE = True
 
     dims_str = '_'.join(str(d) for d in range(cfg.n_dims))
-    states_path = os.path.join('./out/', 'noun_phrase_bkrr_trends', f'dims_{dims_str}_rm292', 'states')
+    states_path = os.path.join(run_dir(cfg), 'states')
     state_path = get_most_recent_state(states_path)
     model, _ = DeepTimePhiPLNN.load(state_path, dtype=dtype)
 
@@ -859,7 +864,8 @@ def main(cfg):
 
     NUM_DIMS = cfg.n_dims
 
-    if PLOT_TRAJECTORIES or PLOT_POTENTIAL_LANDSCAPES:
+    if (PLOT_TRAJECTORIES or PLOT_POTENTIAL_LANDSCAPES) \
+            and cfg.latents.method != 'gpfa':
         n_dims = cfg.n_dims
         target_df = target_df.sort(['filter_value', 'createtime']) \
             .with_columns([
@@ -872,6 +878,7 @@ def main(cfg):
             ) \
             .drop([f'dim_{i}' for i in range(n_dims)])
 
+    if PLOT_TRAJECTORIES or PLOT_POTENTIAL_LANDSCAPES:
         target_df = filter_df_to_time_range(target_df, trange)
 
     if PLOT_TRAJECTORIES:

@@ -21,13 +21,16 @@ from nn_potential import \
     apply_split, \
     run_dir, \
     build_horizon_pairs, \
-    compute_rolling_means, \
+    rolling_frame, \
     compute_training_split, \
     df_to_data, \
     evaluate_dataloader, \
     load_seed_metadata, \
     load_target_df
 from plot_nn_potential import get_most_recent_state
+
+import latent_space
+import splits
 
 
 # Horizons to evaluate and plot
@@ -90,7 +93,7 @@ def model_dir_for_cfg(cfg):
     trend_name = os.path.basename(cfg.trend_path.rstrip('/'))
     # same layout the trainer writes, including the latent and split tags
     dir_path = run_dir(cfg)
-    if cfg.rolling_mean_window != 100:
+    if cfg.latents.method != 'gpfa' and cfg.rolling_mean_window != 100:
         dir_path = f"{dir_path}_rm{cfg.rolling_mean_window}"
     return dir_path
 
@@ -128,11 +131,18 @@ def compute_breakdown_metrics(cfg):
     dims = list(range(n_dims))
 
     print("Loading data...", flush=True)
-    target_df = load_target_df(cfg)
-    rolling_df = compute_rolling_means(cfg, target_df, dims)
-    print(f"  Rolling-mean rows: {len(rolling_df)}", flush=True)
+    if cfg.latents.method == 'gpfa':
+        target_df, _, _ = latent_space.load(cfg, smooth=False)
+        target_df = target_df.rename({latent_space.COORD: 'x0'}) \
+            .select(['createtime', 'filter_value', 'x0']) \
+            .sort(['filter_value', 'createtime'])
+    else:
+        target_df = load_target_df(cfg)
+    rolling_df = rolling_frame(cfg, target_df, dims)
+    print(f"  Timestep rows: {len(rolling_df)}", flush=True)
 
     val_filter_values, cutoff_time = compute_training_split(cfg)
+    spec = splits.SplitSpec.from_cfg(cfg)
 
     state_path = get_most_recent_state(os.path.join(model_dir_for_cfg(cfg), 'states'))
     print(f"Loading model state from {state_path}...", flush=True)
@@ -155,6 +165,7 @@ def compute_breakdown_metrics(cfg):
         _, val_paired = apply_split(
             paired_df, cfg.split_type, cfg.train_fraction,
             val_filter_values=val_filter_values, cutoff_time=cutoff_time,
+            spec=spec, scenario=cfg.objective_scenario,
         )
         val_paired = val_paired.with_columns(pl.col('filter_value').cast(pl.String)) \
             .join(seed_df, left_on='filter_value', right_on='SeedName', how='left')

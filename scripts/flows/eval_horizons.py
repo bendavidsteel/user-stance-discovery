@@ -6,6 +6,9 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
+import latent_space
+import splits
+
 # Heavy imports (jax, plnn, matplotlib) are deferred into main() so that
 # import-time costs are only paid for the ETS/landscape branches that need
 # them.
@@ -102,7 +105,8 @@ def _save_pair_cache(path, by_horizon):
 
 def _select_horizon_pairs(rolling_df, horizon_days, dim_cols,
                           val_filter_values, cutoff_time, split_type, train_fraction,
-                          n_pairs, seed, tolerance_frac, dims):
+                          n_pairs, seed, tolerance_frac, dims,
+                          spec=None, scenario='val_out'):
     """Random sample of val pairs (with attached histories) for ts evaluation.
 
     Pulls from the same val pool the landscape model is evaluated on
@@ -125,6 +129,7 @@ def _select_horizon_pairs(rolling_df, horizon_days, dim_cols,
     _, val_paired = apply_split(
         paired, split_type, train_fraction,
         val_filter_values=val_filter_values, cutoff_time=cutoff_time,
+        spec=spec, scenario=scenario,
     )
     if len(val_paired) == 0:
         return [], {}
@@ -274,6 +279,7 @@ def _evaluate_pairs_with_method(pair_specs, traj_arrays, n_dims, horizon_days,
 
 def compute_ets_losses(rolling_df, horizon_days, dims,
                        val_filter_values, cutoff_time, split_type, train_fraction,
+                       spec=None, scenario='val_out',
                        n_pairs=PAIRS_PER_HORIZON,
                        seed=ETS_SAMPLE_SEED,
                        tolerance_frac=0.25):
@@ -291,7 +297,7 @@ def compute_ets_losses(rolling_df, horizon_days, dims,
     pair_specs, traj_arrays = _select_horizon_pairs(
         rolling_df, horizon_days, dim_cols,
         val_filter_values, cutoff_time, split_type, train_fraction,
-        n_pairs, seed, tolerance_frac, dims,
+        n_pairs, seed, tolerance_frac, dims, spec=spec, scenario=scenario,
     )
 
     def _fit_forecast(hist_d, shift_n):
@@ -312,6 +318,7 @@ def compute_ets_losses(rolling_df, horizon_days, dims,
 
 def compute_theta_losses(rolling_df, horizon_days, dims,
                          val_filter_values, cutoff_time, split_type, train_fraction,
+                         spec=None, scenario='val_out',
                          n_pairs=PAIRS_PER_HORIZON,
                          seed=ETS_SAMPLE_SEED,
                          tolerance_frac=0.25):
@@ -332,7 +339,7 @@ def compute_theta_losses(rolling_df, horizon_days, dims,
     pair_specs, traj_arrays = _select_horizon_pairs(
         rolling_df, horizon_days, dim_cols,
         val_filter_values, cutoff_time, split_type, train_fraction,
-        n_pairs, seed, tolerance_frac, dims,
+        n_pairs, seed, tolerance_frac, dims, spec=spec, scenario=scenario,
     )
 
     def _fit_forecast(hist_d, shift_n):
@@ -366,6 +373,7 @@ def compute_theta_losses(rolling_df, horizon_days, dims,
 def compute_landscape_shared_losses(rolling_df, horizon_days, dims,
                                     val_filter_values, cutoff_time, split_type, train_fraction,
                                     model, key, eval_batch_size,
+                                    spec=None, scenario='val_out',
                                     n_pairs=PAIRS_PER_HORIZON,
                                     seed=ETS_SAMPLE_SEED,
                                     tolerance_frac=0.25):
@@ -381,7 +389,7 @@ def compute_landscape_shared_losses(rolling_df, horizon_days, dims,
     pair_specs, _ = _select_horizon_pairs(
         rolling_df, horizon_days, dim_cols,
         val_filter_values, cutoff_time, split_type, train_fraction,
-        n_pairs, seed, tolerance_frac, dims,
+        n_pairs, seed, tolerance_frac, dims, spec=spec, scenario=scenario,
     )
     if len(pair_specs) == 0:
         return np.array([]), np.array([])
@@ -419,7 +427,7 @@ def main(cfg):
     from plnn.dataset import LandscapeSimulationDataset, NumpyLoader
     from plnn.models import DeepTimePhiPLNN
 
-    from nn_potential import df_to_data, compute_rolling_means, build_horizon_pairs, \
+    from nn_potential import df_to_data, rolling_frame, build_horizon_pairs, \
         evaluate_dataloader, compute_training_split, apply_split, run_dir
     from plot_nn_potential import get_most_recent_state
 
@@ -429,7 +437,7 @@ def main(cfg):
 
     # same layout the trainer writes, including the latent and split tags
     dir_path = run_dir(cfg)
-    if cfg.rolling_mean_window != 100:
+    if cfg.latents.method != 'gpfa' and cfg.rolling_mean_window != 100:
         dir_path = f"{dir_path}_rm{cfg.rolling_mean_window}"
 
     fig_path = f'./figs/{trend_name}'
@@ -472,9 +480,8 @@ def main(cfg):
             flush=True,
         )
         print("Loading data...", flush=True)
-        target_path = os.path.join(cfg.trend_path, f'{cfg.dim_reduction_method}_coords.parquet.zstd')
-        coord_col = f'coord_{n_dims}d'
-        target_df = pl.read_parquet(target_path, columns=['createtime', 'filter_value', coord_col])
+        target_df, _, _ = latent_space.load(cfg, smooth=False)
+        target_df = target_df.rename({latent_space.COORD: 'x0'})
 
         if cfg.platform != 'all':
             target_df = target_df.filter(
@@ -484,16 +491,15 @@ def main(cfg):
             )
 
         target_df = target_df.filter(pl.col('filter_value') != '') \
-            .select(['createtime', 'filter_value', coord_col]) \
-            .sort(['filter_value', 'createtime']) \
-            .rename({coord_col: 'x0'})
+            .select(['createtime', 'filter_value', 'x0']) \
+            .sort(['filter_value', 'createtime'])
 
-        print("Computing rolling means...", flush=True)
-        rolling_df = compute_rolling_means(cfg, target_df, dims)
-        print(f"Rolling mean rows: {len(rolling_df)}", flush=True)
+        rolling_df = rolling_frame(cfg, target_df, dims)
+        print(f"Timestep rows: {len(rolling_df)}", flush=True)
 
         # Recover the same train/val split metadata used during training
         val_filter_values, cutoff_time = compute_training_split(cfg)
+        spec = splits.SplitSpec.from_cfg(cfg)
 
         # Lazily load the landscape model only if some horizon needs model
         # results. ETS shares rolling_df so it predicts the same smoothed
@@ -523,6 +529,7 @@ def main(cfg):
                     _, val_df = apply_split(
                         paired_df, cfg.split_type, cfg.train_fraction,
                         val_filter_values=val_filter_values, cutoff_time=cutoff_time,
+                        spec=spec, scenario=cfg.objective_scenario,
                     )
                     print(f"  Val samples: {len(val_df)}", flush=True)
                     if len(val_df) == 0:
@@ -564,6 +571,7 @@ def main(cfg):
                     rolling_df, horizon, dims,
                     val_filter_values, cutoff_time, cfg.split_type, cfg.train_fraction,
                     model, subkey, cfg.eval_batch_size,
+                    spec=spec, scenario=cfg.objective_scenario,
                 )
                 if len(ms_losses) == 0:
                     print(f"  [model_shared] no eligible pairs at {horizon}d, skipping.", flush=True)
@@ -589,6 +597,7 @@ def main(cfg):
                 ets_losses, ets_baseline_losses = compute_ets_losses(
                     rolling_df, horizon, dims,
                     val_filter_values, cutoff_time, cfg.split_type, cfg.train_fraction,
+                    spec=spec, scenario=cfg.objective_scenario,
                 )
                 if len(ets_losses) == 0:
                     print(f"  [ets] no eligible pairs at {horizon}d, skipping ETS.", flush=True)
@@ -619,6 +628,7 @@ def main(cfg):
                 theta_losses, theta_baseline_losses = compute_theta_losses(
                     rolling_df, horizon, dims,
                     val_filter_values, cutoff_time, cfg.split_type, cfg.train_fraction,
+                    spec=spec, scenario=cfg.objective_scenario,
                 )
                 if len(theta_losses) == 0:
                     print(f"  [theta] no eligible pairs at {horizon}d, skipping Theta.", flush=True)
