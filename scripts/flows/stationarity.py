@@ -15,8 +15,14 @@ What the latent-GP model changes, relative to testing PPCA coordinates:
   `latent_gp.sweep` (--taus / --ou-tau), not this script.
 
   The state is smoothed.  `coord_*` at t depends on observations after t, which
-  is two-sided dependence a unit root test reads as persistence. The filtered
-  `causal_*` state is used instead.
+  is two-sided dependence a unit root test reads as persistence, so the tests
+  read the filtered `causal_*` state. The control is the exception and has to
+  be: a `slow_kind='const'` dimension is constant only in the smoothed state,
+  because the filtered state is a running estimate of that constant and
+  converges over the whole record rather than a burn-in. The fast block is
+  unaffected -- its filtered-to-smoothed gap is flat in time rather than
+  decaying -- and is reported on both states, which on this data does not
+  change the verdict.
 
   The grid is interpolated.  `interp_days` resamples the fit's bin grid by
   linear interpolation, so most rows carry no new information and the
