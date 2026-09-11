@@ -719,9 +719,15 @@ def _fmt(x, digits=3):
     return '--' if x is None or not np.isfinite(x) else f'{x:.{digits}f}'
 
 
-def write_tex(results, cfg, out_dir='./out'):
+def write_tex(results, cfg, out_dir=None):
     """A table of the tests and a macro file, so the prose cites no typed-in
-    numbers. Written to ./out, like the other tables the paper pastes in."""
+    numbers.
+
+    Written to the top of `out_dir`, beside the per-configuration directories
+    `latent_space.latent_root` addresses rather than inside one: the paper
+    pastes in one stationarity table, not one per fit.
+    """
+    out_dir = out_dir or cfg_get(cfg, 'out_dir', './out')
     os.makedirs(out_dir, exist_ok=True)
     fast, slow = results['blocks']['fast'], results['blocks']['slow']
     p = results['panel']
