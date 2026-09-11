@@ -155,6 +155,10 @@ parameters:
   # times the cells of 8, so most of a budget for the least of the evidence.
   latents.bin_factor:
     values: [8, 16]
+  # See joint.yaml. Kept to the three values that bracket the measured decline,
+  # since this sweep pays for a latent fit per value on top of a narrower grid.
+  latents.w_ridge:
+    values: [0.0001, 1.0, 10.0]
 
   # --- landscape model ---
   # sigma above ~0.7 and lr above ~0.02 drove the drift field to zero inside

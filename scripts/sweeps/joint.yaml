@@ -159,6 +159,22 @@ parameters:
   # times the cells of 8, so most of a budget for the least of the evidence.
   latents.bin_factor:
     values: [4, 8, 16]
+  # Prior precision on the loadings. A paired rerun at one configuration put
+  # 90d val_out ceiling_gain at 0.0975 off, 0.0857 at 10 and 0.0362 at 100 --
+  # but sigma, learning_rate and confinement_factor had been selected against
+  # the unregularised geometry, so that comparison holds the landscape fixed
+  # while changing what it is fitted to. Here the search retunes them per
+  # value, which is the test the paired rerun could not be. 1.0 covers the gap
+  # below the smallest value measured, where a prior might buy a readable
+  # table for little skill.
+  #
+  # dim_quality/* is the other half of this axis: it is logged and not
+  # optimised, so the sweep still selects on forecast skill and the trade-off
+  # is read off afterwards. rank_by_volume is deliberately not an axis -- it
+  # reorders the table and touches nothing the objective sees, so a bayes
+  # search cannot learn anything from it. Every trial scores both rankings.
+  latents.w_ridge:
+    values: [0.0001, 1.0, 10.0, 100.0]
 
   # --- landscape model ---
   # sigma above ~0.7 and lr above ~0.02 drove the drift field to zero inside

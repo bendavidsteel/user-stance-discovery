@@ -12,6 +12,7 @@ import polars as pl
 import wandb
 from tqdm import tqdm
 
+import latent_space
 import splits
 from latent_gp import LatentConfig, build_latents, coord_cols
 from latent_gp import cells as gp_cells
@@ -677,6 +678,13 @@ def main(cfg):
             'not of the representation')
 
     target_df = load_latent_df(cfg, spec)
+
+    # Logged, not optimised: whether a fit the forecast likes is also one whose
+    # dimensions can be named is the trade-off the sweep is there to expose.
+    for k, v in latent_space.dimension_quality(cfg).items():
+        wandb.run.summary[f'dim_quality/{k}'] = v
+        logger.info(f'dim_quality/{k} = {v:.4f}')
+
     smooth = cfg.latents.method != 'gpfa'
     rolling_df = rolling_frame(cfg, target_df, list(range(n_dims)))
 

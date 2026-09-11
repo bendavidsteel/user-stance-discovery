@@ -32,6 +32,9 @@ COORD = 'coord'
 # would be a second, hidden opinion about the study window.
 PRECOMPUTED_START = datetime.datetime(2022, 1, 1)
 
+# Targets a dimension is named from, which is what a description reads.
+TOP_TARGETS = 10
+
 
 def load(cfg, smooth=True):
     """Returns (trajectories, (K, J) loadings, target names).
@@ -81,6 +84,56 @@ def n_moving_dims(cfg):
     if cfg.latents.method != 'gpfa':
         return cfg.n_dims
     return min(cfg.latents.n_fast, cfg.n_dims)
+
+
+def ranking_quality(components, volumes, n_top=TOP_TARGETS):
+    """How readable the per-dimension target table is, under both rankings.
+
+    A dimension is named from the targets that top it, so the table is only
+    interpretable if a reader recognises those targets and if the dimensions do
+    not all name themselves after the same few. `prevalence` is their mean
+    volume percentile; `distinctness` is the share of the pooled top-n that is
+    not shared between dimensions, 1 when every dimension names a disjoint set
+    and 0 when they all name the same one. `score` requires both.
+
+    Both rankings are scored from the one fit because the choice between them
+    changes nothing the model is scored on -- only the order the table is read
+    in -- so there is no reason to spend a trial on each.
+    """
+    if volumes is None:
+        return {}
+    order = np.argsort(np.argsort(volumes))
+    percentile = order / max(len(volumes) - 1, 1)
+    out = {}
+    for name, w in (('unweighted', None), ('by_volume', volumes)):
+        out.update({f'{name}/{k}': v for k, v in
+                    _quality(components, percentile, n_top, w).items()})
+    return out
+
+
+def _quality(components, percentile, n_top, weights):
+    score = np.abs(components)
+    if weights is not None:
+        score = score * np.sqrt(weights)
+    n_top = min(n_top, score.shape[1])
+    top = np.argsort(score, axis=1)[:, -n_top:]
+    k = top.shape[0]
+    spread = (len(np.unique(top)) - n_top) / (n_top * k - n_top) if k > 1 else 1.0
+    prevalence = float(percentile[top].mean())
+    return {'prevalence': prevalence, 'distinctness': float(spread),
+            'score': float(np.sqrt(max(prevalence, 0.0) * max(spread, 0.0)))}
+
+
+def dimension_quality(cfg, n_top=TOP_TARGETS):
+    """ranking_quality for the fit cfg names, off the loadings it cached."""
+    if cfg.latents.method != 'gpfa':
+        return {}
+    spec = splits.SplitSpec.from_cfg(cfg)
+    lcfg = LatentConfig.from_cfg(cfg)
+    seed_split = splits.seed_split(gp_cells.seed_names(lcfg.cells_path), spec)
+    components, targets = loading_matrix(build_loadings(
+        lcfg, spec, seed_split, cache_dir=cfg.latents.cache_dir, log=logger.info))
+    return ranking_quality(components, target_volumes(cfg, targets), n_top)
 
 
 def _gpfa(cfg):
