@@ -194,11 +194,20 @@ def assemble(d, W, prec, resid, K):
 
 # ------------------------------------------------------------------ M-step
 
-def m_step(d, Ez, Ezz, prec, target, K, ridge=1e-4):
+def m_step(d, Ez, Ezz, prec, target, K, ridge=1e-4, w_ridge=None):
     """Weighted least squares for (W_j, b_j) given the posterior over z.
 
     `prec` weights each cell and `target` is its pseudo-observation on f; under
     a Gaussian likelihood these are n/sigma^2 and the cell mean.
+
+    `w_ridge` is a Gaussian prior precision on the loadings, shrinking each
+    target by A_j / (A_j + w_ridge): A_j accumulates that target's site
+    precision, so a target the data barely constrains shrinks and one that
+    carries a dimension does not. It has to be an absolute scale -- a ridge
+    proportional to A_j divides every loading by the same constant and changes
+    no comparison. `ridge` stays a singularity guard, and applies alone to the
+    intercept: shrinking b would pull a target's mean stance toward neutral,
+    which is a claim about the data rather than regularisation.
     """
     M, T = d['M'], d['T']
     Eu = jnp.concatenate([Ez, jnp.ones((M, T, 1))], -1).reshape(M * T, K + 1)
@@ -217,7 +226,9 @@ def m_step(d, Ez, Ezz, prec, target, K, ridge=1e-4):
     A = jnp.stack([jnp.stack([ent[min(a, b), max(a, b)] for b in range(K + 1)], -1)
                    for a in range(K + 1)], -2)
     c = jnp.zeros((d['J'], K + 1)).at[d['j']].add((prec * target)[:, None] * Eu[d['flat']])
-    Wb = jnp.linalg.solve(A + ridge * jnp.eye(K + 1), c[..., None])[..., 0]
+    pen = jnp.concatenate([jnp.full(K, ridge if w_ridge is None else w_ridge),
+                           jnp.array([ridge])])
+    Wb = jnp.linalg.solve(A + jnp.diag(pen), c[..., None])[..., 0]
     return Wb[:, :K], Wb[:, K]
 
 

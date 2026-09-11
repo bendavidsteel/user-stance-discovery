@@ -49,15 +49,25 @@ def load_df(dir_path, filter_type, group_by_every='2d', min_filter_count=10, tar
     df = df.filter(pl.col('filter_value') != '')
     return df
 
-def get_top_component_features(components, feature_names, n_features=3):
-    """Get the top contributing features for each PCA component."""
+def get_top_component_features(components, feature_names, n_features=3,
+                               weights=None):
+    """Get the top contributing features for each PCA component.
+
+    `weights` is a per-feature observation count. A loading is a coefficient
+    per unit of the component, so ranking by its magnitude alone treats a
+    feature the fit barely constrains as if it defined the axis; weighting by
+    sqrt(weights) ranks by the feature's share of the variance the component
+    explains instead, which is n_j * loading^2 up to a constant. Reported
+    loadings are unweighted either way -- only the order changes.
+    """
     top_features = {}
-    
+
     for i, component in enumerate(components):
         # Get absolute values to find strongest contributors regardless of direction
         abs_loadings = np.abs(component)
+        score = abs_loadings if weights is None else abs_loadings * np.sqrt(weights)
         # Get indices of top contributing features
-        top_indices = np.argsort(abs_loadings)[-n_features:][::-1]
+        top_indices = np.argsort(score)[-n_features:][::-1]
         # Get feature names and their loadings
         top_feature_info = []
         for idx in top_indices:

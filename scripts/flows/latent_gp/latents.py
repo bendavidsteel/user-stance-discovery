@@ -40,6 +40,12 @@ import polars as pl
 from . import aggregate, calibrate, cells, fit as fit_mod, probs
 
 
+# The singularity guard m_step has always used. At this value the loadings are
+# unregularised -- per-target site precision runs from ~1e2 up -- so it is what
+# every fit before the prior existed used, and the tag omits it to keep those
+# fits addressable.
+W_RIDGE_OFF = 1e-4
+
 @dataclasses.dataclass(frozen=True)
 class LatentConfig:
     cells_path: str
@@ -60,6 +66,7 @@ class LatentConfig:
     prob_resolution: int = 6        # simplex lattice spacing is 1/resolution
     prob_floor: float = 0.01        # uniform mass mixed into each lattice point
     calibration_path: str = ''      # calibrate.py output; required by 'channel'
+    w_ridge: float = W_RIDGE_OFF    # prior precision on the loadings
     seed: int = 0
 
     def __post_init__(self):
@@ -94,6 +101,7 @@ class LatentConfig:
             prob_resolution=cfg.latents.prob_resolution,
             prob_floor=cfg.latents.prob_floor,
             calibration_path=cfg.latents.calibration_path,
+            w_ridge=cfg.latents.get('w_ridge', W_RIDGE_OFF),
             seed=cfg.latents.seed,
         )
 
@@ -107,6 +115,8 @@ class LatentConfig:
         """
         skip = ({'cells_path'} | _unused_by(self.obs_model)
                 | _unused_by_mix(self.n_fast, self.n_dims, self.slow_kind))
+        if self.w_ridge == W_RIDGE_OFF:
+            skip = skip | {'w_ridge'}   # every fit that predates the prior
         body = '|'.join(f'{f.name}={getattr(self, f.name)}'
                         for f in dataclasses.fields(self) if f.name not in skip)
         return hashlib.blake2b(body.encode(), digest_size=6).hexdigest()
@@ -320,7 +330,8 @@ def _fit(lcfg, spec, seed_split, log):
     d_train = cells.pack(cells.deflate(df.filter(pl.Series(train_mask)), lcfg.rho),
                          meta, tr_arch)
     log(f'fitting on {len(d_train["j"]):,} training cells, obs {lcfg.obs_model}')
-    r = fit_mod.fit(d_train, comps, meta['dt'], K, lcfg.iters, seed=lcfg.seed, logL=logL)
+    r = fit_mod.fit(d_train, comps, meta['dt'], K, lcfg.iters, seed=lcfg.seed,
+                    logL=logL, w_ridge=lcfg.w_ridge, log=log)
 
     d_all = cells.pack(cells.deflate(df, lcfg.rho), meta, n_arch)
     Ez, Ezz = fit_mod.infer(d_all, comps, meta['dt'], K,

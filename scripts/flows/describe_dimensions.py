@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 def load_text_df(cfg, columns=['id', 'createtime', 'seed', 'Document', 'Targets', 'Stances']):
     dir_path = cfg.base_stance_path
     df = pl.read_parquet([os.path.join(dir_path, file_name) for file_name in os.listdir(dir_path) if file_name.endswith('.parquet.zstd')], columns=columns)
+    # The corpus stamps createtime UTC-aware; a gpfa latent's is naive, built
+    # off the aggregate's bin grid. polars refuses to pick a supertype for the
+    # two, so the date-range join below fails unless one side is normalised --
+    # and it has to be this one, since the plotting path compares the latent's
+    # createtime against naive datetimes.
+    if df.schema['createtime'].time_zone is not None:
+        df = df.with_columns(pl.col('createtime').dt.convert_time_zone('UTC')
+                             .dt.replace_time_zone(None))
     return df
 
 def get_user_documents(df: pl.DataFrame, text_df: pl.DataFrame, pca_feature_df: pl.DataFrame, direction, filter_val_col, n_exemplars=32):
@@ -408,7 +416,17 @@ def main(cfg):
         .select([pl.col(f'dim_{i}_diff').var() for i in range(n_dims)])\
         .to_numpy()[0]
 
-    component_features = get_top_component_features(components, targets, n_features=100)
+    # These features both name the dimension and choose the documents it is
+    # named from. Which ranking is right depends on latents.w_ridge: with the
+    # loadings unregularised the raw ranking is dominated by targets whose
+    # loading is large because the fit barely constrains them, and volume
+    # weighting is the repair; once they are shrunk, raw |loading| is already a
+    # fair comparison and weighting only pulls every dimension toward the few
+    # highest-volume targets, which makes the dimensions look alike.
+    weights = (latent_space.target_volumes(cfg, targets)
+               if cfg.latents.get('rank_by_volume', True) else None)
+    component_features = get_top_component_features(
+        components, targets, n_features=100, weights=weights)
 
     # Get dimension descriptions
     dimension_labels = get_dimension_descriptions(target_df, component_features, cfg)

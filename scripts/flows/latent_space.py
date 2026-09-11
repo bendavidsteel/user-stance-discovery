@@ -54,6 +54,23 @@ def name(cfg):
     return 'gpfa' if cfg.latents.method == 'gpfa' else cfg.dim_reduction_method
 
 
+def target_volumes(cfg, targets):
+    """Posts behind each target, for weighting a loading ranking.
+
+    The fit solves a weighted least squares per target against a fixed ridge,
+    so a low-volume target's loading is large when it is poorly constrained as
+    readily as when it carries the axis, and ranking on magnitude alone puts
+    the two side by side. None where the representation reports no volume.
+    """
+    if cfg.latents.method != 'gpfa':
+        return None
+    path = LatentConfig.from_cfg(cfg).cells_path
+    vol = pl.scan_parquet(path).group_by('target') \
+        .agg(pl.col('n').sum().alias('v')).collect(engine='streaming')
+    lookup = dict(zip(vol['target'].to_list(), vol['v'].to_list()))
+    return np.array([lookup.get(t, 0.0) for t in targets], dtype=float)
+
+
 def n_moving_dims(cfg):
     """Dimensions that actually drift, which is all a mover ranking can use.
 

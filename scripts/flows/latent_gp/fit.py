@@ -62,8 +62,29 @@ def _marginal_f(d, W, b, Ez, Ezz, K):
     return m, jnp.maximum(v, 1e-10)
 
 
-def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0, logL=None):
-    """EM with a variational Newton E-step; learns W, b, c and the posterior z."""
+def _precision_summary(d, tau):
+    """Quantiles of the site precision each target accumulates.
+
+    w_ridge shrinks a target by A_j / (A_j + w_ridge), so it only means
+    something read against these numbers -- far below them it is the
+    singularity guard it has always been, far above them every loading
+    collapses together.
+    """
+    per_target = np.bincount(np.asarray(d['j']), weights=np.asarray(tau),
+                             minlength=d['J'])
+    q = np.percentile(per_target[per_target > 0], [1, 25, 50, 75, 99])
+    return ('p1 {:.3g}  p25 {:.3g}  median {:.3g}  p75 {:.3g}  p99 {:.3g}'
+            .format(*q))
+
+
+def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0, logL=None,
+        w_ridge=None, log=None):
+    """EM with a variational Newton E-step; learns W, b, c and the posterior z.
+
+    `w_ridge` is the prior precision on the loadings (see core.m_step). It is
+    only interpretable against the per-target site precision the data supplies,
+    so that distribution is logged whenever a logger is given.
+    """
     key = jax.random.PRNGKey(seed)
     obs = ordinal.observation(d, logL)
     W = jax.random.normal(key, (d['J'], K)) / np.sqrt(K)
@@ -77,6 +98,7 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0, logL=None):
     v_f = jnp.ones(d['j'].shape[0])
     tau = h = None
     Ez = Ezz = None
+    first_pass = True
 
     for _ in range(n_iter):
         t_new, nu_new = obs.sites(m_f, v_f, c)
@@ -90,7 +112,12 @@ def fit(d, comps, dt, K, n_iter=25, damping=0.6, seed=0, logL=None):
         G, g = core.assemble(d, W, tau, tau * (nu - b[d['j']]), K)
         Ez, Ezz = smoother(*core.to_information(G, g, Sj))
 
-        W, b = core.m_step(d, Ez, Ezz, tau, nu, K)
+        if log is not None and first_pass:
+            first_pass = False
+            log(f'per-target site precision: {_precision_summary(d, tau)}  '
+                f'(w_ridge {"off" if w_ridge is None else format(w_ridge, "g")})')
+
+        W, b = core.m_step(d, Ez, Ezz, tau, nu, K, w_ridge=w_ridge)
         m_f, v_f = _marginal_f(d, W, b, Ez, Ezz, K)
         c = obs.threshold_step(m_f, v_f, c)
 

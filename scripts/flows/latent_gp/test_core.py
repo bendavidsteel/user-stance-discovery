@@ -7,6 +7,8 @@ these check the implied prior covariance rather than the blocks themselves.
 import numpy as np
 import pytest
 
+import jax.numpy as jnp
+
 from . import core as gpfa
 from . import fit
 
@@ -146,3 +148,81 @@ def test_slow_kind_takes_an_ou():
     comps = fit.prior_components(K=3, n_fast=1, fast_tau=80., slow_kind='ou',
                                  slow_tau=640.)
     assert comps[1][0] == dict(kind='ou', tau=640.0, var=1.0)
+
+
+# --------------------------------------------------- loading prior (w_ridge)
+
+def _two_target_cells(n_small, n_large, K=2, T=4):
+    """One sparse target and one dense one, over a shared latent."""
+    rng = np.random.default_rng(0)
+    M = 6
+    j, m, t = [], [], []
+    for target, n in ((0, n_small), (1, n_large)):
+        for _ in range(n):
+            j.append(target)
+            m.append(rng.integers(M))
+            t.append(rng.integers(T))
+    j = np.array(j); m = np.array(m); t = np.array(t)
+    d = {'J': 2, 'M': M, 'T': T, 'j': jnp.asarray(j),
+         'flat': jnp.asarray(m * T + t)}
+    Ez = jnp.asarray(rng.normal(size=(M, T, K)))
+    Ezz = jnp.zeros((M, T, K, K)) + 1e-3 * jnp.eye(K)
+    return d, Ez, Ezz, K
+
+
+def _solve(w_ridge, n_small=4, n_large=400, prec_scale=1.0):
+    d, Ez, Ezz, K = _two_target_cells(n_small, n_large)
+    rng = np.random.default_rng(1)
+    n_cells = d['j'].shape[0]
+    prec = jnp.full(n_cells, prec_scale)
+    target = jnp.asarray(rng.normal(size=n_cells))
+    return gpfa.m_step(d, Ez, Ezz, prec, target, K, w_ridge=w_ridge)
+
+
+def test_w_ridge_shrinks_the_sparse_target_more_than_the_dense_one():
+    W_off, _ = _solve(None)
+    W_on, _ = _solve(50.0)
+    sparse = np.linalg.norm(W_on[0]) / max(np.linalg.norm(W_off[0]), 1e-12)
+    dense = np.linalg.norm(W_on[1]) / max(np.linalg.norm(W_off[1]), 1e-12)
+    assert sparse < dense, (sparse, dense)
+    assert dense > 0.8, dense           # a target with the evidence keeps it
+
+
+def test_a_ridge_proportional_to_the_evidence_would_not_discriminate():
+    """Why the prior is an absolute scale: scaling every cell's precision
+    together rescales A_j, and a ridge that tracked it would shrink both
+    targets by the same factor."""
+    W_a, _ = _solve(50.0, prec_scale=1.0)
+    W_b, _ = _solve(500.0, prec_scale=10.0)
+    ratio_sparse = np.linalg.norm(W_b[0]) / max(np.linalg.norm(W_a[0]), 1e-12)
+    ratio_dense = np.linalg.norm(W_b[1]) / max(np.linalg.norm(W_a[1]), 1e-12)
+    assert np.isclose(ratio_sparse, ratio_dense, rtol=0.2), \
+        (ratio_sparse, ratio_dense)
+
+
+def test_the_intercept_is_not_shrunk_toward_neutral():
+    """W and b are solved jointly, so penalising W moves b -- but it must move
+    it toward the target's own mean, not toward zero, which is what penalising
+    b would do."""
+    d, Ez, Ezz, K = _two_target_cells(4, 400)
+    rng = np.random.default_rng(1)
+    n_cells = d['j'].shape[0]
+    prec = jnp.full(n_cells, 1.0)
+    target = jnp.asarray(rng.normal(loc=2.0, size=n_cells))
+    _, b = gpfa.m_step(d, Ez, Ezz, prec, target, K, w_ridge=1e6)
+
+    j = np.asarray(d['j'])
+    tg = np.asarray(target)
+    for target_idx in (0, 1):
+        sel = j == target_idx
+        weighted_mean = tg[sel].mean()
+        assert np.isclose(b[target_idx], weighted_mean, atol=1e-3), \
+            (target_idx, float(b[target_idx]), weighted_mean)
+
+
+def test_default_w_ridge_keeps_the_cache_tag_of_fits_that_predate_it():
+    from latent_gp.latents import LatentConfig, W_RIDGE_OFF
+    base = dict(cells_path='x.parquet', n_dims=6, n_fast=1, fast_tau=20.0,
+                fast_kind='ou', slow_kind='const', bin_factor=8)
+    assert LatentConfig(**base).tag == LatentConfig(**base, w_ridge=W_RIDGE_OFF).tag
+    assert LatentConfig(**base).tag != LatentConfig(**base, w_ridge=50.0).tag

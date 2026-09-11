@@ -50,6 +50,21 @@ latents:
   prob_floor: 0.01               # uniform mass mixed into each lattice point
   calibration_path: ''           # latent_gp.calibrate output; 'channel' needs it
 
+  # Gaussian prior precision on the per-target loadings. m_step solves a
+  # weighted least squares per target, so a target the data barely constrains
+  # gets as large a loading as one that carries a dimension; this shrinks each
+  # by A_j / (A_j + w_ridge) against the site precision A_j the target
+  # actually accumulates, which the fit logs. 1e-4 is the old singularity
+  # guard, far below any A_j, and leaves the loadings unregularised.
+  w_ridge: 1e-4
+
+  # Rank a dimension's targets by |loading| * sqrt(volume) rather than
+  # |loading|. Pairs with w_ridge: on at w_ridge's default, where the raw
+  # ranking is dominated by targets the fit barely constrains; off if w_ridge
+  # is ever turned up, or every dimension is topped by the same few
+  # highest-volume targets. Changes only how the axes are read, never the fit.
+  rank_by_volume: true
+
 # Skill, not MSE: a smoother latent lowers model and baseline error together,
 # so optimising MSE would select for smoothing the latent into a constant.
 #
