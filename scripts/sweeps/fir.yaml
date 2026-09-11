@@ -111,12 +111,17 @@ parameters:
   # fast_tau is the one axis that has settled inside its range: 20 took five of
   # the top ten and 10, 40 and 80 all appear, so it is left alone.
   #
-  # n_fast sits at its floor and cannot be widened -- n_fast=0 freezes the
-  # latent and takes rho to 0.03 -- so 4 fills the gap instead. Note that the
-  # pooled objective penalises small n_fast: predicted drift in a frozen
-  # direction lands in E|p|^2 and nowhere else, which cost about a third of rho
-  # at n_fast=1 on synthetic moments. ceiling_gain_per_dim is logged beside it
-  # and does not, so the two together say whether the preference is real.
+  # n_fast is unsettled. 1, 2 and 3 are indistinguishable on the current data
+  # and only 6 is clearly worse, so the range stays wide rather than narrowing
+  # toward the floor; n_fast=0 is not on it because it freezes the latent and
+  # takes rho to 0.03. A bayes search allocates trials endogenously, so its
+  # marginals here are not clean -- settle the axis with a paired rerun.
+  #
+  # The objective cannot compare across n_fast on its own: pooled rho weights a
+  # dimension by its share of displacement variance, so motion concentrated in
+  # one axis is scored on a different problem. ceiling_gain_per_dim removes the
+  # weighting but collapses onto the pooled value when only one axis moves, so
+  # read spurious_drift_ratio and baseline_mse beside both.
   #
   # fast_kind decides whether a drifting dimension is confined. Both kinds are
   # rough and their tau means the same thing, so the pair isolates confinement.
